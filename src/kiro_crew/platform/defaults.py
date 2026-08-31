@@ -67,16 +67,31 @@ class DefaultProviderRegistry:
 
 
 class DefaultPublishRegistry:
-    """Registers no publish provider — the public edition has no artifact-publish
-    destination.  The ``publish_provider`` registry stays empty, so
-    ``get_provider`` raises ``PublishUnavailableError`` (→ 503) and
-    ``list_providers`` returns ``[]`` (dashboard shows "publishing unavailable")
-    with no core branching.  A companion registers its concrete providers here
-    via the ``publish_provider.register_provider`` side effect — the structural
-    twin of ``DefaultProviderRegistry.register_acp_backends``."""
+    """Registers the personal cloud drive as an OPT-IN publish destination.
+
+    The seam itself stays destination-agnostic: this registry is the ONLY place the
+    public edition names a concrete provider, and ``publish_sync`` reaches it through
+    the neutral ``publish_provider`` registry, so a companion edition that registers a
+    different destination never loads this code.  The structural twin of
+    ``DefaultProviderRegistry.register_acp_backends``.
+
+    The drive registers under its OWN key, not ``DEFAULT_PROVIDER``, so it is available
+    and selectable without being the edition's default: ``publish_sync`` resolves an
+    unnamed destination through the default key, which stays unregistered here, so a
+    publish that names nothing still gets a 503.  What holds the default back is a
+    cross-store contract for whether a publication exists, which is being built
+    separately -- see ``personal_drive.PERSONAL_DRIVE_PROVIDER``.  Whether a publish is
+    PERMITTED remains the orthogonal decision of the governance ceiling
+    (``capabilities.publish``) and the operator's ``publish.allowed_destinations``
+    narrowing knob; this seam only decides who implements the transfer.
+    """
 
     def register_publish_providers(self) -> None:
-        return None
+        # Deferred import: the provider reaches the deploy engine and the profile
+        # registry, which resolve config, which installs this platform context.
+        from kiro_crew.publish import personal_drive
+
+        personal_drive.register_public_edition_providers()
 
 
 class DefaultAgentRuntime:
