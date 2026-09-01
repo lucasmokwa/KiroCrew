@@ -179,6 +179,12 @@ SLOT_OWNED_META_KEYS: frozenset[str] = frozenset(
         "mode",
         "workspace",
         "project",
+        # Remote-execution binding: owned by the slot, so clearing it in memory
+        # clears it on disk. Left unowned, a rebind or an unbind would be undone
+        # on the next save by the carried-forward copy.
+        "executor",
+        "instance_id",
+        "remote_slot",
         "folder_id",
         "app",
         "artifact",

@@ -2450,6 +2450,13 @@ def test_the_empty_window_merge_mirrors_the_full_saves_slot_owned_fields(tmp_pat
         "app",
         "forked_from",
         "linked_session_key",
+        # The remote-execution binding, written all-three-or-none by both the
+        # full save and the merge. A plain local newborn carries none of it; the
+        # bound case is covered by
+        # test_remote_crew_execution.py::test_the_empty_window_merge_persists_a_complete_binding.
+        "executor",
+        "instance_id",
+        "remote_slot",
     }
     for key in sorted(SLOT_OWNED_META_KEYS - excluded):
         assert key in meta, f"slot-owned field {key!r} missing after an empty-window forced save"
