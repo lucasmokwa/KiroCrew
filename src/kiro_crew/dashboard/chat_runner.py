@@ -177,9 +177,11 @@ from kiro_crew.hooks import (
     TOOL_ALLOW,
     TOOL_AUTO_APPROVE,
     TOOL_DENY,
+    FileTooLargeError,
     ToolHookResult,
     fire_tool_hooks,
     safe_read_file,
+    safe_read_file_bytes_nolink,
     validate_file_path,
 )
 from kiro_crew.image_artifacts import register_images_off_loop
@@ -3410,8 +3412,17 @@ def _expand_prompt_mention(
     mention = parts[0] if parts else body
     user_text = parts[1].strip() if len(parts) > 1 else ""
 
+    # Resolve local prompts against THIS chat slot's project (per-slot), the
+    # same directory the slot's agent runs in, so an @mention of a local prompt
+    # matches the caller's checkout rather than a gateway-global dir. A slot
+    # with no project resolves to None -> local prompts simply are not matched
+    # (fail-closed), the same as before when there was no gateway project. This
+    # reads slot.project directly (this slot, no cross-slot fallback) — the SAME
+    # question the HTTP prompt surface asks via requesting_slot_project — so the
+    # chat and HTTP surfaces agree on where "local" is for a given chat.
+    project_dir = Path(slot.project) if slot.project else None
     try:
-        match = _find_prompt(mention)
+        match = _find_prompt(mention, project_dir)
     except Exception:
         return message, "not_found"
     if not match:
@@ -3420,18 +3431,60 @@ def _expand_prompt_mention(
     if is_sensitive_path(match["path"]):
         return message, "blocked"
 
+    # Read the path the resolver CANONICALIZED, and re-check it there. The check
+    # above tests the name as addressed, which for a link is not the file a read
+    # by that name would return — so a project shipping
+    # ``.kiro/prompts/creds.md -> ~/.aws/credentials`` would pass a check on the
+    # link and have its target injected into the turn.
+    resolved = validate_file_path(match["path"])
+    if resolved is None:
+        return message, "blocked"
+
+    # Read through the same hardlink-rejecting gate as the scoped HTTP read
+    # rather than by name: validating a path and then opening that name leaves a
+    # window in which the final component is swapped for a link, so the bytes
+    # injected into the turn are not the bytes any check ran against. The gate
+    # opens FIRST with ``O_NOFOLLOW`` and validates the descriptor it actually
+    # read — a leaf swapped for a symlink cannot be opened at all, and
+    # ``st_nlink > 1`` or a non-regular inode is refused — so the inode checked
+    # is the inode injected. Every entry reaching here was minted by the listing
+    # gate, which refuses a link outright, so this closes the swap window rather
+    # than a standing hole.
+    #
+    # ``within_root`` is passed only when the entry POSITIVELY names one of the
+    # two user scopes, whose root the listing gate already validated the entry
+    # against; it additionally pins the opened inode's real path inside that
+    # root, so an ancestor directory swapped for a link cannot redirect the read
+    # out of the prompt tree. A package SOP's roots are plural and supplied by
+    # the platform seam, so it keeps the containment its own provider gave it
+    # instead of a root this function guessed — and an entry shape naming
+    # neither falls back to the same treatment rather than to a wrong root.
+    read_root: Path | None = None
+    if not match.get("package"):
+        if match.get("source") == "local":
+            read_root = project_dir / ".kiro" / "prompts" if project_dir else None
+        elif match.get("source") == "global":
+            read_root = Path.home() / ".kiro" / "prompts"
     try:
-        raw = Path(match["path"]).read_bytes()
-    except OSError:
-        return message, "not_found"
-    if len(raw) > MAX_PROMPT_BYTES:
+        raw = safe_read_file_bytes_nolink(
+            resolved,
+            within_root=str(read_root) if read_root else None,
+            max_bytes=MAX_PROMPT_BYTES,
+        )
+    except FileTooLargeError:
         logger.warning(
-            "Prompt %s exceeds max size (%d > %d bytes)",
+            "Prompt %s exceeds max size (%d bytes)",
             mention,
-            len(raw),
             MAX_PROMPT_BYTES,
         )
         return message, "too_large"
+    if raw is None:
+        # The gate refuses and reads through one descriptor, so it cannot say
+        # which of the two happened — and both are a prompt this turn does not
+        # get. Reported as the miss the plain read already reported for an
+        # unreadable file, so a refusal reveals nothing a link's target could be
+        # probed with.
+        return message, "not_found"
     content = raw.decode("utf-8", errors="replace")
     # Strip display-metadata frontmatter BEFORE redaction and the char count,
     # so both the redaction pass and the user-visible "Loaded prompt … chars"
@@ -5740,7 +5793,10 @@ async def _run_chat(
         if sub == "get" and len(args) > 2:
             # /prompts get <name> — invoke the prompt in this chat
             name = args[2]
-            expanded, status = _expand_prompt_mention(f"@{name}", state, slot)
+            # Off the loop for the same reason as the @mention path below.
+            expanded, status = await asyncio.to_thread(
+                _expand_prompt_mention, f"@{name}", state, slot
+            )
             if status == "ok":
                 sel().log_tool_invocation(
                     session_key="",
@@ -5811,7 +5867,10 @@ async def _run_chat(
             # _list_aim_prompts walks the (possibly large or edition-supplied)
             # prompt_source_roots() with rglob + file reads; keep it off the
             # event loop so a slow/network-backed root can't stall the gateway.
-            prompts = await asyncio.to_thread(_list_aim_prompts)
+            # Pass THIS slot's project so its local prompts are listed per-slot
+            # (fail-closed to global-only when the slot has no project).
+            project_dir = Path(slot.project) if slot.project else None
+            prompts = await asyncio.to_thread(_list_aim_prompts, project_dir)
         except Exception:
             prompts = []
         if not prompts:
@@ -6302,7 +6361,13 @@ async def _run_chat(
         prompt_expanded = _is_quick_prompt
         if message.startswith("@") and not is_slash and _prompt_depth < 1:
             original = message
-            message, _status = _expand_prompt_mention(message, state, slot)
+            # Off the loop, the same way the `$skill` expansion below is: the whole
+            # of this resolves and READS files — the project's prompt directory is
+            # not the gateway's own and may be network-backed, and its local half
+            # is uncacheable, so it cannot be amortized away. `await` keeps the
+            # ordering identical to the inline call: nothing after this line runs
+            # until the expansion (and the chip it appends) is complete.
+            message, _status = await asyncio.to_thread(_expand_prompt_mention, message, state, slot)
             if _status == "ok":
                 prompt_expanded = True
                 sel().log_tool_invocation(
