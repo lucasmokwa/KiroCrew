@@ -55,7 +55,25 @@ const UserMessage = memo(function UserMessage({ content, meta, timestamp, timest
 
   // A steered message was injected into the running turn (meta.steer set by the
   // steer_push WS echo). Render it distinctly and animate it in exactly once.
+  //
+  // The badge asserts the message reached the RUNNING turn, so only a state the
+  // backend has confirmed may render it. `written` means the bytes were accepted
+  // and nothing more, and `requeued` means the turn ended without taking them and
+  // the message runs as its own turn -- neither is an injection, so both render as
+  // an ordinary user message (#7246).
+  //
+  // A row with no `steerState` is treated as legacy and keeps the original
+  // rendering -- EXCEPT the client's own optimistic bubble, which is minted with
+  // `{ steer: true, optimistic: true }` and no state before the server has
+  // answered at all. That is the least confirmed a steer can be, so letting it
+  // fall through to the legacy case would show the success badge at exactly the
+  // moment nothing is known, which is the claim this change exists to stop.
+  const steerState = (meta as { steerState?: string } | undefined)?.steerState
+  const steerOptimistic = !!(meta as { optimistic?: boolean } | undefined)?.optimistic
   const isSteer = !!(meta && (meta as { steer?: boolean }).steer)
+    && steerState !== 'written'
+    && steerState !== 'requeued'
+    && !(steerOptimistic && !steerState)
   const [playSteer] = useState(() => {
     if (!isSteer) return false
     // Stable identity across the steer lifecycle: the optimistic bubble mounts
