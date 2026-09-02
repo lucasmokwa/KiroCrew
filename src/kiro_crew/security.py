@@ -8029,8 +8029,17 @@ def _resolved_env_root(name: str) -> str | None:
     default inside the owning helper, and that default is already covered by the
     ``$HOME``-rooted entry, so an extra target under a bogus value is harmless
     and fail-safe.
+
+    The value is read VERBATIM -- deliberately not stripped. Whitespace is a legal
+    POSIX path character, and the owning resolvers take the variable raw
+    (``_valid_override_home`` does ``Path(os.environ.get("KIROCREW_HOME"))``, and
+    ``config_dir`` then ``mkdir``s whatever that names). Stripping here would
+    anchor the target set on ``<root>`` while the process actually runs out of
+    ``"<root> "``, leaving the real ``.env``, signing keys and governance files
+    outside the floor this set defines. Emptiness is the only test, so an unset
+    or empty override still resolves to ``None``.
     """
-    raw = os.environ.get(name, "").strip()
+    raw = os.environ.get(name, "")
     if not raw:
         return None
     try:
@@ -8334,6 +8343,71 @@ def crew_home_prefixes() -> tuple[str, ...]:
     credential store when describing the posture.
     """
     return tuple(_CREW_HOME_PREFIXES)
+
+
+def sandbox_credential_targets(exclude_leaves: tuple[str, ...] = ()) -> tuple[str, ...]:
+    """Absolute, on-disk-case credential targets for an OS sandbox deny list.
+
+    Applies the SAME anchoring as :func:`_home_dir_targets_uncached` -- the
+    ``$HOME`` projection of every :data:`_SENSITIVE_HOME_DIRS` leaf, plus each
+    env-override re-anchor -- so a caller building a sandbox mask inherits the
+    read gate's anchor rules instead of re-deriving them. That is the whole point
+    of this living here: a mask that projected leaves under ``Path.home()`` only
+    would silently miss a credential the operator relocated with
+    ``KIROCREW_HOME``, ``CLAUDE_CONFIG_DIR`` or ``CLAUDE_HOME``, which is exactly
+    the drift a hand-maintained list already produced once.
+
+    Unlike the read gate's target set the paths are NOT casefolded: that set
+    exists to COMPARE against candidate paths, while these are handed to a
+    sandbox backend to deny on disk, and a casefolded path denies nothing on a
+    case-sensitive filesystem.
+
+    *exclude_leaves* drops a ``$HOME``-relative leaf (and its override
+    re-anchors) from the result -- for an adapter whose own OAuth token it must
+    still be able to read in order to authenticate. Excluding a leaf here only
+    removes it from THIS mask; the read gate still fences it for the agent's own
+    file tools, so the two controls keep covering different readers.
+
+    Returns logical paths. The launcher ``os.path.abspath``es what it is handed,
+    and the macOS profile emits both a ``subpath`` and a ``literal`` deny for each
+    entry, so both a directory and a plain file leaf are valid entries.
+    """
+    excluded = set(exclude_leaves)
+    leaves = [d for d in _SENSITIVE_HOME_DIRS if d not in excluded]
+    resolved = _resolved_root_key()
+    # BOTH home spellings, reusing the two anchors the read gate already keys on.
+    # On a host whose home is itself a symlink (``/home/u`` -> ``/local/home/u``) the
+    # resolved and logical spellings differ, and the read gate can absorb that because
+    # it realpaths a candidate BEFORE comparing. A sandbox deny list gets no such
+    # normalisation -- it denies the paths it is handed -- so denying only the resolved
+    # form would leave every credential reachable through the symlinked one.
+    home_anchors = {resolved.home, resolved.logical_home}
+    targets: set[str] = {
+        os.path.join(anchor, *d.split("/")) for anchor in home_anchors for d in leaves
+    }
+    # KIROCREW_HOME: the crew secrets (signing keys, governance ceiling, .env)
+    # live directly under the override, not under either default crew prefix.
+    if resolved.crew_home:
+        for d in leaves:
+            for prefix in _CREW_HOME_PREFIXES:
+                if d == prefix or d.startswith(prefix + "/"):
+                    leaf = d[len(prefix) :].lstrip("/")
+                    targets.add(
+                        os.path.join(resolved.crew_home, *leaf.split("/"))
+                        if leaf
+                        else resolved.crew_home
+                    )
+                    break
+    # An adapter's OAuth token follows that adapter's own home override.
+    for leaf, root_fields in _OVERRIDE_ANCHORED_LEAVES:
+        if leaf in excluded or leaf not in _SENSITIVE_HOME_DIRS:
+            continue
+        basename = leaf.split("/")[-1]
+        for field in root_fields:
+            root = getattr(resolved, field, None)
+            if root:
+                targets.add(os.path.join(root, basename))
+    return tuple(sorted(targets))
 
 
 def exfil_query_min_len() -> int:
