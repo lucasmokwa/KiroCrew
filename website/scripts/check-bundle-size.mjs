@@ -46,10 +46,10 @@ export const CHUNK_BUDGETS = {
   // closed-PR prune group and the expanded Disconnect guidance are the largest
   // recent catalog increments included in this measurement; Dev Fleet's
   // per-pod system readout then adds its own strings across the same 12
-  // catalogs on top of that baseline. The Drive gallery's keys across 13
-  // catalogs ride inside the headroom that measurement already left, so this
-  // branch does not move the ceiling.
-  all: 10490 * KB, // measured 9985 KB before the pod-system catalog keys (~5% headroom)
+  // catalogs on top of that baseline. The Drive gallery, structured-monitor
+  // form, and translated session-mode guard are included in the current
+  // analyze-build measurement.
+  all: 10585 * KB, // measured 10080.35 KiB (~5% headroom)
 
   // The i18n RUNTIME — the i18next singleton, `initI18n`, the English catalog —
   // named after `src/i18n/t.ts`. Held separately from `all` above because
@@ -57,11 +57,9 @@ export const CHUNK_BUDGETS = {
   // `t()` no longer pull the other twelve catalogs in behind them. Sized for the
   // English catalog plus headroom; a jump here means a non-English catalog, or a
   // library, reached the runtime module.
-  // Re-measured 2026-08-27 at 702 KB: the previous `measured 641 KB` note was
-  // ~60 KB stale, which left main sitting a few hundred bytes under its own
-  // ceiling, so any PR adding an English string tripped this gate rather than
-  // the new library or surface it exists to catch.
-  t: 740 * KB, // measured 702 KB
+  // Re-measured after the structured-monitor form and translated session-mode
+  // guard so a new English string does not consume stale headroom.
+  t: 772 * KB, // measured 734.96 KiB (~5% headroom)
 
   // Pierre editor implementation (PR #4072 replaced Monaco, whose
   // 'editor.api2' chunk this entry set used to carry) -- the code-editor
