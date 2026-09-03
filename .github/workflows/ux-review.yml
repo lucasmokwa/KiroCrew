@@ -369,6 +369,13 @@ jobs:
                - Theme tokens and existing ui/ primitives over hand-rolled
                  components or hardcoded colors; platform convention over novel
                  widgets for standard jobs.
+               - Flat color only: the brand system is flat, so any CSS
+                 gradient (linear-, radial-, or conic-gradient) on a
+                 user-facing surface is a finding — dashboard chrome, dialogs,
+                 and exported images such as share cards alike. A fill is one
+                 solid token (or the brand purple #7c3aed on an outward-facing
+                 artifact). "Looks premium" is not an exception; a gradient
+                 also bands under every social platform's re-encode.
                - Habituation: flag diffs that MOVE or REORDER existing controls
                  without functional need (breaks muscle memory), and duplicate
                  new paths to an already-reachable action.
