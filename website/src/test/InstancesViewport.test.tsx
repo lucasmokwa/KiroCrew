@@ -3,7 +3,7 @@ import { act, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { renderWithProviders, createTestStore } from './helpers'
 import InstancesViewport from '../components/InstancesViewport'
-import { setActiveId } from '../store/instancesSlice'
+import { setActiveId, setWarm } from '../store/instancesSlice'
 import {
   consumeChatHandoff,
   installSoftNavigate,
@@ -795,6 +795,46 @@ describe('InstancesViewport', () => {
     // The iframe was remounted (new element) to force the reload.
     const after = document.querySelector('iframe') as HTMLIFrameElement
     expect(after).not.toBe(before)
+  })
+
+  it('still times out when a re-mint churns the token faster than the watchdog window', async () => {
+    // Regression: the watchdog's countdown used to restart on every token change.
+    // Re-mints are rate-limited to REFRESH_MIN_INTERVAL_MS (10s), which is SHORTER
+    // than PANE_LOAD_TIMEOUT_MS (15s), so a pane stuck in an auth-expired -> re-mint
+    // loop reset the clock before it could ever fire: the loading overlay spun
+    // forever and Retry was unreachable. The deadline is now absolute per load.
+    mockConnectedCd1()
+    vi.useFakeTimers()
+    try {
+      const store = createTestStore({
+        instances: { warm: { 'cd-1': { port: 7778, token: 'tok-0' } }, activeId: 'cd-1', mru: ['cd-1'], unread: {}, ready: {} },
+      })
+      renderWithProviders(<InstancesViewport />, { store })
+      expect(screen.getByText(/Loading pane/i)).toBeInTheDocument()
+
+      // Two re-mints inside the 15s window, 10s apart — same port, new token each
+      // time (exactly what the auth-expired path dispatches).
+      await act(async () => {
+        vi.advanceTimersByTime(10_000)
+        store.dispatch(setWarm({ id: 'cd-1', conn: { port: 7778, token: 'tok-1' } }))
+      })
+      expect(screen.queryByText(/Pane failed to load/i)).toBeNull()
+      await act(async () => {
+        vi.advanceTimersByTime(4_000)
+        store.dispatch(setWarm({ id: 'cd-1', conn: { port: 7778, token: 'tok-2' } }))
+      })
+      // 14s elapsed: still inside the ORIGINAL deadline, so not yet a failure.
+      expect(screen.queryByText(/Pane failed to load/i)).toBeNull()
+
+      // Crossing 15s of real elapsed time fires, despite the churn.
+      await act(async () => {
+        vi.advanceTimersByTime(1_000)
+      })
+      expect(screen.getByText(/Pane failed to load/i)).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /Retry/i })).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('a late mc-embedded-ready clears a timed-out verdict without Retry', async () => {

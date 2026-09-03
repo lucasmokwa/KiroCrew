@@ -62,6 +62,10 @@ const REFRESH_MIN_INTERVAL_MS = 10_000
 // Iframes report no load errors to the parent, and the backend can say
 // "connected" while the browser-side load is dead (tunnel half-up, token
 // rejected, remote gateway mid-restart) — this watchdog is the only signal.
+// NOTE: this is deliberately LONGER than REFRESH_MIN_INTERVAL_MS, so the two
+// cannot be compared to decide whether the watchdog can fire. Its deadline is
+// absolute per load (see `deadlineRef` below) precisely so that a re-mint
+// arriving inside the window cannot postpone it.
 const PANE_LOAD_TIMEOUT_MS = 15_000
 
 /** Parse a ``<int>[hm]`` TTL (e.g. "20h", "30m") to seconds; 0 if unparseable. */
@@ -377,15 +381,37 @@ export default function InstancesViewport({ macInset = false }: { macInset?: boo
   const activeWarmToken = activeWarmConn?.token
   const activeReady = activeId ? !!ready[activeId] : true
   const activeSeq = activeId ? reloadSeq[activeId] || 0 : 0
+  // The watchdog's deadline is ABSOLUTE and anchored to the identity of the LOAD
+  // — (id, port, reloadSeq) — not to the iframe src. A token re-mint also changes
+  // the src, but it must NOT push the deadline out: refreshes are rate-limited to
+  // REFRESH_MIN_INTERVAL_MS, which is SHORTER than PANE_LOAD_TIMEOUT_MS, so a pane
+  // stuck in an `mc-auth-expired` -> re-mint loop used to restart a
+  // countdown-from-scratch every 10s and could never reach 15s. Symptom: the
+  // loading overlay spun forever and the error panel — the only affordance
+  // carrying Retry and the tab strip — could never surface, stranding the user on
+  // a pane that looked merely slow. An explicit Retry or a real port change is
+  // what legitimately restarts the clock. A re-mint that DOES load still clears
+  // the verdict, because `activeTimedOut` additionally requires `!activeReady`.
+  const deadlineRef = useRef<{ key: string; at: number } | null>(null)
   useEffect(() => {
-    if (!activeId || activeWarmPort === undefined || activeReady) return
+    if (!activeId || activeWarmPort === undefined || activeReady) {
+      deadlineRef.current = null
+      return
+    }
     const id = activeId
+    const key = `${id}:${activeWarmPort}:${activeSeq}`
+    let dl = deadlineRef.current
+    if (!dl || dl.key !== key) {
+      dl = { key, at: Date.now() + PANE_LOAD_TIMEOUT_MS }
+      deadlineRef.current = dl
+    }
     const t = window.setTimeout(() => {
       setTimedOut(prev => (prev[id] ? prev : { ...prev, [id]: true }))
-    }, PANE_LOAD_TIMEOUT_MS)
+    }, Math.max(0, dl.at - Date.now()))
     return () => window.clearTimeout(t)
-    // Restart the countdown whenever the pane's src (port/token) or forced
-    // reload sequence changes — each of those reloads the iframe.
+    // `activeWarmToken` stays in the deps so a re-mint RE-ARMS the timer the
+    // cleanup above just cleared — against the existing deadline, rather than
+    // minting a new one.
   }, [activeId, activeWarmPort, activeWarmToken, activeSeq, activeReady])
 
   const retry = useCallback(
