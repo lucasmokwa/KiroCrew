@@ -389,9 +389,8 @@ inside a run whose conclusion reads `cancelled`.
        the PR sits with nothing polling it.
      - **2** → the store could not be read; treat exactly like 20.
 
-     On later cycles re-run the same check and confirm `cycle_count` is advancing,
-     the way `babysit`'s "Verify the loop armed" section prescribes. A loop that is
-     present but frozen at the same count is also a fallback case.
+     On later cycles re-run the same check and confirm `cycle_count` is advancing.
+     A loop that is present but frozen at the same count is also a fallback case.
 
      **`max_cycles` is a poll budget, not a round budget.** One 20–40 minute round costs several 5-minute cycles, so the default expires after two or three rounds — silently. `max_cycles=80` is roughly ten rounds; raise it via `monitor_update` if the work is still live near the cap. See `babysit` for the loop's own semantics.
 
@@ -508,11 +507,10 @@ owning slot, so its tool calls hit a deny-by-default approval path and time out,
 while a denied tool inside a completed turn still records `last_status: ok`;
 heartbeat runs under a name allowlist with no shell and no `git push`.
 
-**One narrow exception.** `babysit`'s `pr_watch` script cron costs zero tokens per
-quiet cycle, so it is the better driver during a *pure-watch* stretch — but only
-when you have **nothing to answer**: no open concern, and no bot post still
-expected. `pr_watch` reads no comment bodies, so it cannot see the "every bot has
-posted" half of round completion. Any doubt → `monitor_start`.
+`monitor_watch` is the zero-turn choice for a provider-fact-only watch, but this
+fix-and-push loop depends on generic reviewer posts and must stay on the bounded
+`monitor_start` path. Do not register the compatibility `pr_watch` script cron for
+new work.
 
 Cron *is* correct for post-merge cleanup, as a `script` cron at roughly a 5-minute
 interval — an hourly one loses the merge-to-teardown race.

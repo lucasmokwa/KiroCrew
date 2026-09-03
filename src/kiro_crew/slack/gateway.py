@@ -219,6 +219,7 @@ from kiro_crew.monitoring.completion import (
 from kiro_crew.monitoring.models import (
     MonitorActionDisposition,
     MonitorDispatchResult,
+    MonitorOutcome,
     monitor_state_public_dict,
 )
 from kiro_crew.platform import boot_platform
@@ -6224,6 +6225,7 @@ class GatewayOrchestrator:
             return result
 
         controller: MonitorController | None = None
+        notified_monitor_terminals: set[tuple[str, MonitorOutcome, float]] = set()
 
         async def _monitor_tick(loop: NudgeLoop) -> None:
             if controller is not None:
@@ -6232,6 +6234,23 @@ class GatewayOrchestrator:
         def _observer(event: str, loop: NudgeLoop | None) -> None:
             if event == "expired" and loop is not None:
                 self._notify_nudge_expired(loop)
+            elif (
+                loop is not None
+                and is_structured_monitor_loop(loop)
+                and loop.monitor is not None
+                and not loop.active
+            ):
+                state = loop.monitor
+                if state.outcome in {
+                    MonitorOutcome.SUCCESS,
+                    MonitorOutcome.BLOCKED,
+                    MonitorOutcome.BUDGET,
+                    MonitorOutcome.TARGET_UNAVAILABLE,
+                }:
+                    terminal_key = (loop.id, state.outcome, state.stopped_at)
+                    if terminal_key not in notified_monitor_terminals:
+                        notified_monitor_terminals.add(terminal_key)
+                        self._notify_nudge_expired(loop)
             if self.dashboard_state and loop is not None:
                 loop_payload: dict[str, Any] = {
                     "id": loop.id,
@@ -6309,29 +6328,41 @@ class GatewayOrchestrator:
             # Dashboard loops bind on the BARE slot key, so re-qualify those to
             # get a working jump-to-source slot link.
             meta = None if is_channel_key(key) else self._notif_meta(f"dashboard:{key}")
+            if is_structured_monitor_loop(loop):
+                monitor = loop.monitor
+                assert monitor is not None
+                outcome = monitor.outcome
+                if outcome is MonitorOutcome.SUCCESS:
+                    title = "Pull request monitor finished — review readiness reached"
+                    body = (
+                        "The structured monitor reached its review-ready objective "
+                        "without spending another agent turn. No action needed."
+                    )
+                elif outcome is MonitorOutcome.BUDGET:
+                    title = "Pull request monitor spent its budget"
+                    body = (
+                        "The structured monitor stopped at its configured budget "
+                        "before the pull request became review-ready."
+                    )
+                elif outcome is MonitorOutcome.TARGET_UNAVAILABLE:
+                    title = "Pull request monitor could not deliver an action"
+                    body = (
+                        "The structured monitor stopped because its owning session "
+                        "could not accept an actionable wake."
+                    )
+                else:
+                    title = "Pull request monitor stopped on a terminal blocker"
+                    body = (
+                        "The structured monitor found a terminal provider or pull "
+                        "request condition before review readiness. Reopen the pull "
+                        "request to continue monitoring, or abandon this monitor."
+                    )
+                self.dashboard_state.notify("agent", title, body, meta=meta)
+                return
             capped_out = loop.max_cycles and loop.cycle_count >= loop.max_cycles
-            # Every branch below except the terminal one explains why the loop stopped
-            # SHORT of its goal. A terminal subject is not short of anything, so it
-            # outranks all of them -- expressed ONCE here rather than as a guard added to
-            # each branch after a reviewer finds it, which is how the cap and then the
-            # wall-clock budget each came to preempt it in turn.
-            #
-            # An OWED terminal turn is terminal news too, and it is the third way this
-            # same precedence has been lost. A CHANNEL-bound loop deliberately does not
-            # settle on observation -- it learns its watch finished from a delivered turn,
-            # so the probe records the owed turn in ``terminal_pending`` and leaves the
-            # loop active with no ``outcome`` and no ``MONITOR_TERMINAL_REASON``. If that
-            # final turn is refused (a busy thread, the ordinary case) and the retry finds
-            # a bound spent, ``_timer`` deactivates on the bound before the settlement
-            # that would have promoted the debt ever runs. Reading ``stopped_reason``
-            # alone then contradicts a fact already durably on disk, and announces a watch
-            # that SUCCEEDED with the same signal as one that ran out of cycles.
-            #
-            # Scope: the debt is consulted for the WORDING only. The bound that actually
-            # stopped the loop keeps its own ``stopped_reason`` untouched -- so the spent
-            # cap stays observable, and every consumer of that literal (notably the
-            # monitor_update revival affordance, which revives a ``cycle_cap`` loop when
-            # the cap is raised) behaves exactly as before.
+            # Gated legacy loops may carry an inferred monitor solely to classify a
+            # pull-request terminal event. They still use legacy notification wording,
+            # including an owed terminal turn that lost a race with a spent bound.
             owed = ""
             if loop.monitor:
                 owed = str(getattr(loop.monitor, "terminal_pending", "") or "")
@@ -6359,37 +6390,7 @@ class GatewayOrchestrator:
                     "has no timed expiry."
                 )
             elif terminal:
-                # Reached only when no earlier branch claimed the notice, which the two
-                # ``not terminal`` guards above guarantee. FIRST in effect, ahead of every "why it stopped early" reading. Removing the cap
-                # guard from this branch was not enough: the runtime-budget and
-                # approval-stall branches are evaluated before it, so a terminal
-                # delivery that also exhausted the wall-clock budget still reported
-                # "its budget ran out without reporting done, its goal may still be
-                # unmet" about a finished subject. Every other branch here explains why
-                # the loop stopped SHORT of its goal; a terminal subject is not short of
-                # anything, so it outranks all of them rather than needing a guard added
-                # to each one as that one is found.
-                #
-                # It also cannot depend on ``capped_out``: the delivery that CARRIES the
-                # terminal news increments ``cycle_count`` before the settlement records
-                # the reason -- deliberately, so a cancelled write cannot lose the turn's
-                # accounting -- so a subject merging on the capping delivery would
-                # otherwise be announced as a cap with the goal possibly unmet.
-                #
-                # MERGED and CLOSED-UNMERGED are both terminal but they are not the same
-                # news. "No action needed" is true of the first and false of the second,
-                # which stopped on a question the operator has to answer: reopen, or
-                # abandon. The monitor's outcome carries the distinction (SUCCESS vs
-                # BLOCKED), so the wording follows it rather than lumping both under a
-                # finish.
                 settled = getattr(loop.monitor, "outcome", None) if loop.monitor else None
-                # A settled outcome wins. An UNSETTLED one falls back to the owed turn,
-                # which draws the same distinction from the same vocabulary -- the probe
-                # records ``"success" if merged else "blocked"``, matching
-                # ``MonitorOutcome.SUCCESS``/``BLOCKED``. Without this fallback a merged
-                # subject reaching here on the debt alone would take the else branch and
-                # be announced as closed-unmerged: the misleading-ending defect moved
-                # rather than fixed.
                 decided = getattr(settled, "value", settled) or owed
                 if decided == "success":
                     title = "Monitoring loop finished — what it was watching is done"
@@ -6399,7 +6400,7 @@ class GatewayOrchestrator:
                         "nothing left to observe. No action needed; arm a new loop "
                         "if you want to watch something else."
                     )
-                else:
+                elif decided == "blocked":
                     title = "Monitoring loop stopped — its subject was closed unmerged"
                     body = (
                         f"The loop stopped after {loop.cycle_count} cycles because "
@@ -6407,6 +6408,12 @@ class GatewayOrchestrator:
                         "merged. Nothing is left to observe, but the work is not "
                         "finished: decide whether to reopen it or abandon it, then "
                         "arm a new loop if you reopen."
+                    )
+                else:
+                    title = "Monitoring loop finished — it reported done"
+                    body = (
+                        f"The loop stopped after {loop.cycle_count} cycles because its "
+                        "goal reported completion. Open the session for the final details."
                     )
             else:
                 title = "Monitoring loop hit its cycle cap"

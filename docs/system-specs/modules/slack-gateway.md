@@ -419,6 +419,10 @@ in-flight claim, and calls the Slack/Discord or dashboard adapter only for
 not add the legacy cycle tag. Every non-actionable, retry, and terminal decision
 dispatches zero turns.
 
+Terminal observer notifications are deduplicated for structured monitors. Gated
+legacy loops use only their existing `expired` notification; the following `fired`
+event must not deliver the same terminal notification again.
+
 Slack's structured inline nudge runs through `TurnDriver` with the shared,
 session-bound directive consumer. Genuine core-MCP `monitor_update`,
 `monitor_stop`, and structured `autonudge_stop` tool results therefore mutate
