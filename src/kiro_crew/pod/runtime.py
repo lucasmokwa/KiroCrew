@@ -34,6 +34,7 @@ except ImportError:  # pragma: no cover - Windows
 from kiro_crew import pinned_fs
 from kiro_crew import seed as seed_mod
 from kiro_crew.atomic_write import atomic_write, atomic_write_at
+from kiro_crew.instances import run_marker
 from kiro_crew.loopback_http import loopback_urlopen
 from kiro_crew.platform_compat import (
     IS_LINUX,
@@ -1578,59 +1579,121 @@ class PodOwnershipUnproven(PodError):
     """
 
 
-def port_owner(cfg: PodConfig, name: str, port: int) -> str:
-    """Who holds *port*: :data:`OWNER_POD`, :data:`OWNER_FOREIGN`, or
-    :data:`OWNER_UNPROVEN`.
+def _pod_pid_record_path(cfg: PodConfig, name: str, port: int) -> Path:
+    """Path of pod *name*'s gateway pid sidecar inside its isolated home."""
+    return cfg.home_dir(name) / run_marker.RUN_DIR_NAME / run_marker.pid_file_name(port)
 
-    The proof is pid identity, the same shape ``port_resolution._gateway_owns_port``
-    uses for the live gateway: the process listening on the port must be the pod's
-    own (:func:`main_pid`). Three branches are worth naming.
 
-    **Ownership is scoped to the address the probe talked to.** A port NUMBER can
-    carry several LISTEN sockets on different local addresses, so "some process of
-    ours holds this port" is not the question -- the question is who a
-    ``127.0.0.1`` connect reaches. ``loopback_owner_pids`` answers exactly that,
-    mirroring the kernel's most-specific-bind dispatch. Taking every pid on the
-    port instead would let a pod bound to one specific local address vouch for a
-    foreign listener holding ``127.0.0.1`` on the same port -- the squatter would
-    be trusted BECAUSE the real pod exists elsewhere on that number. This scope
-    must stay in step with the address :func:`_probe_health` dials.
+def _pod_recorded_pid(cfg: PodConfig, name: str, port: int) -> int | None:
+    """Gateway PID recorded in pod *name*'s isolated home, PROVEN to still name
+    that same process, or ``None``.
 
-    **A pod with no process, on a port somebody holds, is FOREIGN -- not
-    unproven.** This is the whole bug. A pod whose gateway lost the bind race has
-    no process at all, so there is no pid to match; if the answer were "cannot
-    tell" the squatter's 200 would still be reported as this pod's health, which
-    is exactly the state this function exists to name. A non-empty listener list
-    plus a pod that authoritatively has no pid IS proof the responder is someone
-    else.
+    A bare pid is not an identity. ``clear_marker`` runs only on a graceful
+    shutdown, so a crashed or SIGKILLed pod leaves its sidecar behind, and the
+    number in it can afterwards be recycled onto an unrelated process. The
+    gateway therefore records its start-time identity in a ``.start`` sidecar
+    beside the pid (``run_marker.pid_start_token``), and this reader re-derives
+    that identity live: a recycled pid answers with its OWN start time, which
+    cannot match the one the pod's gateway recorded.
 
-    **Undecidable stays undecidable.** No ``lsof``/``netstat``, a throwing
-    lookup, or a service manager that cannot be asked all return
-    :data:`OWNER_UNPROVEN`. Each caller then decides for itself: :func:`health`
-    keeps its pre-identity behaviour, because refusing would turn every pod on
-    such a host into a permanently unhealthy one -- a self-inflicted outage in
-    place of a misreport -- while :func:`mint_token`, which hands over a
-    credential, requires positive proof. That mirrors
-    ``cli_server._replacement_is_serving`` applying its listener check "only where
-    it can pass", and ``port_resolution._gateway_owns_port`` failing closed on the
-    path that sends the secret.
+    Fails CLOSED on every way of not knowing -- no record, no start identity (a
+    pod whose checkout predates the binding), or a host that will not report a
+    start time at all, which includes a Windows box with no implementation. An
+    unproven record must read as "no record", never as one that agrees.
     """
-    if not IS_POSIX or not listening_pid_tool_available():
+    record = run_marker.read_pid_record_path(_pod_pid_record_path(cfg, name, port))
+    if record is None:
+        return None
+    pid, recorded_start = record
+    if not recorded_start:
+        return None
+    live_start = run_marker.pid_start_token(pid)
+    if not live_start or live_start != recorded_start:
+        return None
+    return pid
+
+
+def _unproven_remedy(cfg: PodConfig, name: str, port: int) -> str:
+    """How to fix an unproven ownership verdict -- the two causes differ.
+
+    A record that is absent, malformed, or names a pid whose start identity no
+    longer matches is crash residue or a stale generation, and a restart writes a
+    fresh, provable one. A record that carries NO start identity is a different
+    failure with the opposite remedy: a pod's gateway is its checkout's own venv
+    binary, so a worktree branched before the start-identity sidecar existed
+    writes no token, and restarting it writes none either -- telling the operator
+    to restart would send them round a loop that cannot terminate.
+    """
+    record = run_marker.read_pid_record_path(_pod_pid_record_path(cfg, name, port))
+    if record is not None and not record[1]:
+        return (
+            f"The record names a pid but carries no start identity, and a restart "
+            f"cannot add one: a pod's gateway is its worktree's own venv binary, so "
+            f"this checkout predates the start-identity sidecar. Update that "
+            f"worktree to a build that writes one and re-provision it "
+            f"(`kirocrew pod provision {name}`), then `kirocrew pod down {name} && "
+            f"kirocrew pod up {name}`."
+        )
+    return (
+        f"A record left behind by a crash cannot attest, so restarting it is what "
+        f"re-establishes the proof: `kirocrew pod down {name} && "
+        f"kirocrew pod up {name}`."
+    )
+
+
+def port_owner(cfg: PodConfig, name: str, port: int) -> str:
+    """Attest who serves *port* for pod *name*.
+
+    The proof is agreement between two independent pod-owned facts: the gateway
+    PID sidecar in the pod's isolated ``0700`` home and the service manager's
+    current ``MainPID`` (or launchd PID). The pod unit is ``Type=simple`` and
+    execs the gateway in place, so that PID is the process that bound the port,
+    and the sidecar is written only AFTER that bind succeeds. A pod that lost
+    the bind race therefore has no agreeing record to offer.
+
+    That agreement is only worth anything because the record proves its own
+    freshness: :func:`_pod_recorded_pid` answers with a pid ONLY when the
+    process it names still has the start-time identity the record was written
+    with, so a sidecar left behind by a crash cannot attest once its pid has
+    been recycled. Without that binding the number alone could name somebody
+    else, which is the only reason listener attribution was ever load-bearing.
+
+    Listener attribution is CORROBORATION, not a precondition. Its view is
+    scoped to the 127.0.0.1 listener the HTTP client reaches, so a pid on the
+    port that is not ours is positive proof of a foreign responder and outranks
+    any record. But when the host has no usable listener evidence -- no lookup
+    tool, a lookup that failed, or a lookup that simply could not see the socket
+    -- a provably fresh PID-record/MainPID agreement is sufficient. That is the
+    normal supported path on a minimal Linux host, and on any host where the
+    caller cannot see another process's sockets (an unprivileged process asking
+    ``lsof`` about a gateway started by the user's service manager, which is
+    exactly how ``pod api`` runs). Requiring attribution there would withhold
+    the credential from every healthy pod forever.
+
+    Listener attribution is still never sufficient ON ITS OWN: a pid that holds
+    the port but has no fresh record behind it stays :data:`OWNER_UNPROVEN`.
+    """
+    if not IS_POSIX:
         return OWNER_UNPROVEN
+    try:
+        recorded = _pod_recorded_pid(cfg, name, port)
+        ours = main_pid(cfg, name)
+    except Exception:
+        return OWNER_UNPROVEN
+    attested = recorded is not None and ours is not None and recorded == ours
+    verdict = OWNER_POD if attested else OWNER_UNPROVEN
+
+    if not listening_pid_tool_available():
+        return verdict
     try:
         pids = set(loopback_owner_pids(find_port_listeners(port)))
     except Exception:
-        return OWNER_UNPROVEN
+        return verdict
     if not pids:
-        # Something answered HTTP but no LISTEN socket covering loopback is
-        # visible. The two observations disagree, so claim nothing.
-        return OWNER_UNPROVEN
-    try:
-        ours = main_pid(cfg, name)
-    except Exception:
-        # Could not ask the service manager — see the docstring.
-        return OWNER_UNPROVEN
-    return OWNER_POD if ours is not None and ours in pids else OWNER_FOREIGN
+        return verdict
+    if ours is None or ours not in pids:
+        return OWNER_FOREIGN
+    return verdict
 
 
 def _probe_health(port: int, timeout: int = 3) -> int:
@@ -1711,11 +1774,11 @@ def mint_token(cfg: PodConfig, name: str, ttl: str = "2h") -> str:
                 f"belong to whatever owns that port."
             )
         raise PodOwnershipUnproven(
-            f"withholding a credential for pod {name!r}: could not prove which "
-            f"process holds :{port} (no lsof/netstat on this host, or the service "
-            f"manager could not be asked), and this call would put the pod's own "
-            f"secret on the wire to whatever answered. Install lsof so ownership "
-            f"can be proven, or pin a free PORT= in {cfg.env_file(name)}."
+            f"withholding a credential for pod {name!r}: could not prove "
+            f"ownership of :{port} from the gateway pid record and the service "
+            f"manager's current MainPID, so this call cannot prove which "
+            f"process would receive the pod's secret. "
+            f"{_unproven_remedy(cfg, name, port)}"
         )
     url = f"http://127.0.0.1:{port}/api/token/local?ttl={urllib.parse.quote(str(ttl))}"
     req = urllib.request.Request(url, headers={"X-Local-Secret": secret})
@@ -1729,6 +1792,182 @@ def mint_token(cfg: PodConfig, name: str, ttl: str = "2h") -> str:
     if not token:
         raise PodError(f"gateway returned empty token on :{port} ({name})")
     return token
+
+
+# --------------------------------------------------------------------------- #
+# Authenticated API front door. The caller never handles the pod credential:
+# mint_token() proves ownership, then this module adds the query token expected
+# by dashboard.token_auth.
+# --------------------------------------------------------------------------- #
+API_METHODS: tuple[str, ...] = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE")
+API_READ_METHODS: tuple[str, ...] = ("GET", "HEAD")
+API_TIMEOUT_SECS = 30
+API_BODY_MAX_BYTES = 32 * 1024 * 1024
+
+
+def api_path(path: str) -> str:
+    """Return *path* as a rooted ``/api`` path without any credential.
+
+    Full URLs are accepted but their authority is discarded: every request is
+    still sent to the selected pod on loopback. A caller-supplied ``token`` query
+    parameter is refused before host access; the error never repeats its value or
+    the credential-bearing URL.
+    """
+    raw = path.strip()
+    try:
+        parts = urllib.parse.urlsplit(raw)
+    except ValueError as exc:
+        raise PodError("invalid request path (value withheld)") from exc
+    if parts.scheme or parts.netloc:
+        raw = urllib.parse.urlunsplit(("", "", parts.path, parts.query, ""))
+        try:
+            parts = urllib.parse.urlsplit(raw)
+        except ValueError as exc:  # defensive: the authority was already removed
+            raise PodError("invalid request path (value withheld)") from exc
+    try:
+        query = urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
+    except ValueError as exc:
+        raise PodError("invalid request query (value withheld)") from exc
+    if any(key == "token" for key, _value in query):
+        raise PodError(
+            "the request path carries a `token` query parameter; refusing to "
+            "forward or display it. `pod api` mints the pod credential itself — "
+            "remove that parameter and retry."
+        )
+    normalized = parts.path or "/"
+    if not normalized.startswith("/"):
+        normalized = "/" + normalized
+    if normalized != "/api" and not normalized.startswith("/api/"):
+        normalized = "/api" + normalized
+    if parts.query:
+        normalized += "?" + parts.query
+    return normalized
+
+
+def _authenticated_url(port: int, path: str, token: str) -> str:
+    parts = urllib.parse.urlsplit(api_path(path))
+    query = urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
+    query.append(("token", token))
+    target = urllib.parse.urlunsplit(
+        parts._replace(query=urllib.parse.urlencode(query), fragment="")
+    )
+    return f"http://127.0.0.1:{port}{target}"
+
+
+def _read_capped(stream: object, method: str, path: str, name: str) -> str:
+    """Read and decode one response without buffering more than the hard cap."""
+    try:
+        chunk = stream.read(API_BODY_MAX_BYTES + 1)  # type: ignore[attr-defined]
+    except (OSError, http.client.HTTPException) as exc:
+        raise PodError(
+            f"{method} {api_path(path)} on pod {name!r}: the response body could "
+            f"not be read ({type(exc).__name__}).\n"
+            f"  Is it healthy? kirocrew pod status {name}\n"
+            f"  Its logs:      kirocrew pod logs {name}"
+        ) from exc
+    if len(chunk) > API_BODY_MAX_BYTES:
+        raise PodError(
+            f"{method} {api_path(path)} on pod {name!r} returned more than "
+            f"{API_BODY_MAX_BYTES} bytes; refusing to buffer it. Narrow the request."
+        )
+    return chunk.decode("utf-8", "replace")
+
+
+def _scrub_token_string(text: str, token: str) -> str:
+    """Remove printable encodings of *token* from one string."""
+    escaped = "".join(f"\\u{ord(char):04x}" for char in token)
+    forms = {
+        token,
+        urllib.parse.quote(token, safe=""),
+        urllib.parse.quote_plus(token, safe=""),
+        escaped,
+        escaped.upper().replace("\\U", "\\u"),
+    }
+    for form in sorted(forms, key=len, reverse=True):
+        if form:
+            text = text.replace(form, "<token>")
+    return text
+
+
+def _scrub_json_tokens(value: object, token: str) -> object:
+    """Recursively scrub every JSON string key and value."""
+    if isinstance(value, str):
+        return _scrub_token_string(value, token)
+    if isinstance(value, list):
+        return [_scrub_json_tokens(item, token) for item in value]
+    if isinstance(value, dict):
+        return {
+            _scrub_token_string(key, token): _scrub_json_tokens(item, token)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _scrub_token(text: str, token: str) -> str:
+    """Remove raw, encoded, and JSON-escaped forms of *token* from text."""
+    if not token:
+        return text
+    try:
+        parsed = json.loads(text)
+    except (ValueError, RecursionError):
+        return _scrub_token_string(text, token)
+    try:
+        scrubbed = _scrub_json_tokens(parsed, token)
+    except RecursionError:
+        return "<response omitted: JSON nesting exceeds scrubber limit>"
+    return json.dumps(scrubbed, ensure_ascii=False)
+
+
+def pod_api(
+    cfg: PodConfig,
+    name: str,
+    method: str,
+    path: str,
+    *,
+    data: str = "",
+    allow_write: bool = False,
+) -> tuple[int, str]:
+    """Make one authenticated request to pod *name* and return status/body."""
+    validate_name(name)
+    method = method.upper()
+    normalized = api_path(path)  # validation happens before any host access
+    if method not in API_METHODS:
+        raise PodError(f"unsupported method {method!r} (expected one of: {', '.join(API_METHODS)})")
+    if method not in API_READ_METHODS and not allow_write:
+        raise PodError(
+            f"refusing to send {method} to pod {name!r}: `pod api` permits only "
+            f"{', '.join(API_READ_METHODS)} unless --allow-write is passed.\n"
+            f"  Retry: kirocrew pod api {name} {method} {normalized} --allow-write"
+        )
+    if not is_active(cfg, name):
+        raise PodError(
+            f"pod {name!r} is not running, so there is nothing to call.\n"
+            f"  Start it:   kirocrew pod up {name}\n"
+            f"  What is up: kirocrew pod ls"
+        )
+    port = derive_port(cfg, name)
+    token = mint_token(cfg, name)
+    url = _authenticated_url(port, normalized, token)
+    body = data.encode("utf-8") if data else None
+    headers = {"Content-Type": "application/json"} if data else {}
+    request = urllib.request.Request(url, data=body, headers=headers, method=method)
+    try:
+        # Loopback-only call; caller input contributes only the path, never host.
+        with loopback_urlopen(request, timeout=API_TIMEOUT_SECS) as response:  # nosemgrep
+            raw = _read_capped(response, method, normalized, name)
+            return response.status, _scrub_token(raw, token)
+    except urllib.error.HTTPError as exc:
+        raw = _read_capped(exc, method, normalized, name)
+        return exc.code, _scrub_token(raw, token)
+    except (urllib.error.URLError, OSError, http.client.HTTPException) as exc:
+        # urllib may include request.full_url in exception text. Do not render
+        # exception values at all: the authenticated URL is credential-bearing.
+        raise PodError(
+            f"{method} {normalized} on pod {name!r} (:{port}) did not complete "
+            f"({type(exc).__name__}).\n"
+            f"  Is it healthy? kirocrew pod status {name}\n"
+            f"  Its logs:      kirocrew pod logs {name}"
+        ) from exc
 
 
 # --------------------------------------------------------------------------- #

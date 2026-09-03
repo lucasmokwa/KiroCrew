@@ -136,3 +136,35 @@ class TestTopLevelHelpLayout:
         # The help text spells the port out; keep it honest against the binder.
         assert str(_DEFAULT_PORT) in out
         assert cli_help._DEFAULT_PORT_TEXT == str(_DEFAULT_PORT)
+
+
+class TestPodApiMethodParsing:
+    @pytest.mark.parametrize("spelling", ["GET", "Get", "get"])
+    def test_method_is_case_insensitive_and_canonicalized(self, spelling, monkeypatch, tmp_path):
+        import kiro_crew.cli_commands as cli_commands
+
+        captured = []
+        monkeypatch.setenv("KIROCREW_PROJECT_DIR", str(tmp_path))
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["kirocrew", "pod", "api", "wt", spelling, "health"],
+        )
+        monkeypatch.setattr(cli_commands, "_pod", lambda args: captured.append(args))
+        from kiro_crew.cli import main
+
+        main()
+        assert len(captured) == 1
+        assert captured[0].method == "GET"
+
+    def test_invalid_method_lists_only_six_canonical_choices(self, monkeypatch, tmp_path, capsys):
+        _out, err = _capture_cli(
+            monkeypatch,
+            tmp_path,
+            capsys,
+            ["pod", "api", "wt", "TRACE", "health"],
+        )
+        match = re.search(r"choose from ([^)]+)\)", err)
+        assert match
+        choices = [item.strip().strip("'\"") for item in match.group(1).split(",")]
+        assert choices == ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"]
