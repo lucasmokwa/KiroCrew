@@ -37,9 +37,9 @@ class TestCatalog:
         # 130 patterns ported byte-exact from the retired agent-config
         # deniedCommands list + 7 legacy security.py globs (secret-fetch tool
         # names + boto3 underscore destructive forms) restored as regexes.
-        assert len(BUILTIN_DENIED_RULES) == 148
+        assert len(BUILTIN_DENIED_RULES) == 149
         ids = [r.id for r in BUILTIN_DENIED_RULES]
-        assert len(set(ids)) == 148
+        assert len(set(ids)) == 149
 
     def test_token_mint_is_blocked_in_both_the_cli_and_module_forms(self):
         """`kirocrew token` mints a signed dashboard token that authenticates to EVERY gateway
@@ -178,7 +178,7 @@ class TestCatalog:
     def test_patterns_match_manifest_verbatim(self):
         golden = json.loads(_GOLDEN.read_text(encoding="utf-8"))
         golden_by_id = {g["id"]: g for g in golden}
-        assert len(golden_by_id) == 148
+        assert len(golden_by_id) == 149
         for rule in BUILTIN_DENIED_RULES:
             g = golden_by_id[rule.id]
             assert rule.pattern == g["pattern"]
@@ -192,7 +192,7 @@ class TestCatalog:
 
     def test_builtin_denied_rules_accessor_returns_dicts(self):
         rules = builtin_denied_rules()
-        assert len(rules) == 148
+        assert len(rules) == 149
         first = rules[0]
         assert set(first.keys()) == {"id", "pattern", "category", "description"}
         assert isinstance(first["id"], str)
@@ -5799,3 +5799,240 @@ class TestPolynomialBacktrackingStaysBounded:
         matcher.match(subject)
         elapsed = time.perf_counter() - start
         assert elapsed < 1.0, f"deny evaluation took {elapsed:.1f}s — gate would stall"
+
+
+class TestSandboxEscapeSshSelf:
+    """``ssh localhost`` re-enters this machine OUTSIDE the sandbox.
+
+    The far side of a loopback/own-host connection is a fresh unsandboxed
+    login shell (and passwordless sudo there completes a full escape), so the
+    ssh family refuses a target that resolves to THIS machine.  Same two-tier
+    build as the other self-protection floors: a lint-safe positional regex in
+    the catalog (the human-auditable subset) plus the ``_is_ssh_to_self`` argv
+    floor that resolves options, quoting, ``user@`` prefixes, and this host's
+    own names.  Connections to OTHER hosts must stay allowed — including a
+    remote command that merely mentions "localhost" as data.
+    """
+
+    _RULE = "sandbox-escape-ssh-self"
+
+    @staticmethod
+    def _effective():
+        return list(compute_effective_denied(BUILTIN_DENIED_RULES, (), False, (), ()))
+
+    def test_rule_is_registered_on_both_tiers(self):
+        assert self._RULE in {r.id for r in BUILTIN_DENIED_RULES}
+        assert self._RULE in security._SELF_PROTECTION_FLOOR_RULE_IDS
+        assert self._RULE in security._SELF_PROTECTION_FLOOR_NOTES
+        assert _rule_pattern(self._RULE) in self._effective()
+        # A pattern that fails the safety lint is silently DISABLED by
+        # ``_DenyMatcher`` — the rule would report as present while enforcing
+        # nothing, which is exactly how the first draft of this rule failed.
+        assert is_safe_user_regex(_rule_pattern(self._RULE))
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            # Regex-tier spellings (target directly after the verb).
+            "ssh localhost 'sudo -n true'",
+            "ssh 127.0.0.1 whoami",
+            "ssh ::1 uptime",
+            "ssh user@localhost id",
+            "scp localhost:/var/tmp/f .",
+            "true; ssh localhost id",
+            "ssh $(hostname) id",
+            "ssh.exe localhost id",
+            # Floor-only spellings (options/quoting the regex cannot resolve).
+            "ssh -o StrictHostKeyChecking=no localhost 'sudo -n true'",
+            "ssh -p 22 localhost id",
+            'ssh "localhost" id',
+            "ssh 127.1 whoami",
+            "bash -c 'ssh localhost id'",
+            "rsync -av /var/tmp/d/ localhost:/var/tmp/b/",
+            "sftp user@localhost",
+            "ssh ssh://localhost:22 id",
+            # Option-shadow fail-closed: a valueless-in-scp/rsync flag must
+            # not swallow the target (the shape that defeated round one).
+            "scp -r localhost:/dir .",
+            "rsync -r localhost:/src /dst",
+            "ssh -q localhost id",
+            "ssh -vp 22 localhost id",
+            # Redirections are removed from argv the way bash removes them.
+            "ssh >/dev/null localhost id",
+            "ssh > /dev/null localhost id",
+            "ssh 2>&1 localhost id",
+            "ssh -p 22 localhost>/dev/null",
+            # Routing options set the destination regardless of the operand —
+            # in both the ``key=value`` and OpenSSH's config-style whitespace
+            # spellings, and the attached jump-host form.
+            "ssh -ohostname=localhost far-alias id",
+            "ssh -o hostname=localhost far-alias id",
+            "ssh -o proxyjump=localhost far-host id",
+            'ssh -o "Hostname localhost" far-alias id',
+            'ssh -o "ProxyJump localhost" far-host id',
+            "ssh -Jlocalhost far-host id",
+            # URI authority and @-in-path parsing.
+            "rsync rsync://localhost/module/x .",
+            "scp -v localhost:/tmp/a@b .",
+            # IP-literal forms: IPv6, IPv4-mapped, decimal, hex.
+            "ssh ::ffff:127.0.0.1 id",
+            "ssh 2130706433 id",
+            "ssh 0x7f000001 id",
+            # An expansion's embedded default is the destination when the
+            # variable is unset — bash substitutes it before exec.
+            "ssh ${TARGET:-localhost} id",
+            'ssh "${TARGET:-localhost}" id',
+            "ssh ${H:=127.0.0.1} id",
+        ],
+    )
+    def test_self_targets_are_denied(self, cmd):
+        assert _denied_by(cmd) == self._RULE, cmd
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            # The remote command is DATA: "localhost" in a later operand is not
+            # a destination, quoted or not.
+            "ssh far-host.example.com 'curl localhost:8080/health'",
+            "ssh far-host.example.com curl localhost:8080/health",
+            "ssh far-host 'grep localhost /var/tmp/hostsfile'",
+            # Ordinary remote work stays allowed.
+            "ssh clu1767-ops.example.com uptime",
+            "scp file.txt far-host:/var/tmp/",
+            "rsync -av src/ far-host:/dst/",
+            "sftp far-host",
+            "ssh -o proxycommand='nc %h %p' far-host id",
+            "ssh -l ubuntu far-host id",
+            # Non-connection mentions.
+            "grep -r localhost src/",
+            "echo ssh localhost",
+            "curl http://localhost:8080/api",
+            "man ssh",
+            # Subset/false-positive guards from review: a REMOTE host that
+            # merely starts with "localhost", an IPv6 that merely starts with
+            # "::1", an unrelated program name, an unrelated variable, and a
+            # data-naming opt=value.
+            "ssh localhost.example.com id",
+            "ssh ::10 id",
+            "notssh localhost",
+            "ssh $HOSTNAME_BACKUP id",
+            "rsync --exclude=localhost src/ far-host:/d/",
+            # The whitespace routing form is read only in a VALUE SLOT: in
+            # operand position a two-word token is remote command data.
+            "ssh far-host 'hostname localhost'",
+            # Forward/bind specs name listen addresses and far-side hops, not
+            # a destination this process connects to from here.
+            "ssh -L 127.0.0.1:8080:db:5432 far-host",
+            "ssh -D localhost:1080 far-host",
+            "ssh -R localhost:2222:localhost:22 far-host",
+            "ssh -W localhost:22 far-host",
+            "ssh -b localhost far-host id",
+            "ssh -l ubuntu far-host uptime",
+            # A remote-host default in an expansion stays allowed; only the
+            # embedded word is checked, and a bare $VAR is the documented
+            # run-time residual.
+            "ssh ${TARGET:-far-host} id",
+        ],
+    )
+    def test_other_hosts_and_mentions_stay_allowed(self, cmd):
+        assert _denied_by(cmd) is None, cmd
+
+    def test_own_hostname_is_denied_once_resolved(self, monkeypatch):
+        # The enriched set reads the published cache; enrichment happens in a
+        # worker thread (see test_own_name_resolution below), so the deny path
+        # is tested against a directly-published set.
+        monkeypatch.setattr(security, "_OWN_HOST_RESOLVE_DONE", True)
+        monkeypatch.setattr(
+            security, "_OWN_HOST_NAMES_CACHE", frozenset({"myhost.example.com", "myhost"})
+        )
+        assert _denied_by("ssh myhost.example.com sudo id") == self._RULE
+        assert _denied_by("ssh user@myhost id") == self._RULE
+        assert _denied_by("ssh otherhost.example.com id") is None
+
+    def test_first_own_host_command_is_denied_without_waiting_for_dns(self, monkeypatch):
+        # The gethostname seed is published SYNCHRONOUSLY on first use, so the
+        # very first `ssh <own-hostname>` is denied even while DNS enrichment
+        # has not run (no resolution race).
+        monkeypatch.setattr(security, "_OWN_HOST_RESOLVE_DONE", False)
+        monkeypatch.setattr(security, "_OWN_HOST_NAMES_CACHE", None)
+        # Backoff pushed to the future so no enrichment thread spawns in-test.
+        monkeypatch.setattr(security, "_OWN_HOST_RESOLVE_NEXT_TRY", float("inf"))
+        monkeypatch.setattr(security.socket, "gethostname", lambda: "MyHost.Example.Com")
+        assert _denied_by("ssh myhost.example.com sudo id") == self._RULE
+        assert _denied_by("ssh myhost id") == self._RULE
+        assert _denied_by("ssh otherhost.example.com id") is None
+
+    def test_unresolved_own_names_still_block_loopback(self, monkeypatch):
+        # The loopback half never depends on the seed or on DNS enrichment.
+        monkeypatch.setattr(security, "_OWN_HOST_RESOLVE_DONE", False)
+        monkeypatch.setattr(security, "_OWN_HOST_NAMES_CACHE", None)
+        monkeypatch.setattr(security, "_OWN_HOST_RESOLVE_NEXT_TRY", float("inf"))
+
+        def _boom():
+            raise OSError("no hostname")
+
+        monkeypatch.setattr(security.socket, "gethostname", _boom)
+        assert _denied_by("ssh -p 22 localhost id") == self._RULE
+        assert security._own_host_names() == frozenset()
+
+    def test_own_name_resolution_is_best_effort(self, monkeypatch):
+        # The resolver itself (thread body) tolerates hostname/DNS failures.
+        def _boom():
+            raise OSError("no hostname")
+
+        monkeypatch.setattr(security.socket, "gethostname", _boom)
+        monkeypatch.setattr(security.socket, "getfqdn", _boom)
+        assert security._resolve_own_host_names() == frozenset()
+        monkeypatch.setattr(security.socket, "gethostname", lambda: "MyHost.Example.Com")
+        monkeypatch.setattr(security.socket, "getfqdn", lambda: "myhost.example.com")
+        monkeypatch.setattr(
+            security.socket, "getaddrinfo", lambda *a, **k: (_ for _ in ()).throw(OSError())
+        )
+        resolved = security._resolve_own_host_names()
+        assert {"myhost.example.com", "myhost"} <= resolved
+
+    def test_pattern_is_a_subset_of_the_floor_predicate(self):
+        """The catalog-visible pattern must never claim more than the floor.
+
+        Mirror of ``test_retained_pattern_is_a_subset_of_its_predicate``: every
+        command the pattern denies must also be denied by ``_is_ssh_to_self``,
+        or the displayed text and the enforcement drift apart.
+        """
+        rx = re.compile(_rule_pattern(self._RULE), re.IGNORECASE)
+        corpus = [
+            "ssh localhost id",
+            "scp localhost x",
+            "rsync localhost x",
+            "sftp localhost",
+            "ssh user@127.0.0.1",
+            "ssh ::1",
+            "scp localhost:/var/tmp/f .",
+            "ssh $(hostname) id",
+            "ssh ${HOSTNAME} id",
+            "true; ssh localhost",
+            "ssh.exe localhost id",
+            "dir/ssh localhost",
+            "/usr/bin/ssh localhost id",
+            "ssh localhost:",
+        ]
+        for cmd in corpus:
+            if rx.search(cmd.lower()):
+                assert security._is_ssh_to_self(cmd.lower()), (
+                    f"pattern matched but predicate did not: {cmd}"
+                )
+
+    def test_opt_out_disables_both_tiers(self):
+        effective = compute_effective_denied(
+            BUILTIN_DENIED_RULES, (self._RULE,), False, (), ()
+        )
+        assert is_denied("ssh -p 22 localhost id", denied_regexes=list(effective)) is None
+        assert is_denied("ssh localhost id", denied_regexes=list(effective)) is None
+
+    def test_tokenizer_failure_does_not_allow_the_regex_form(self, monkeypatch):
+        # Union, not replacement: with the floor's tokenizer down, the raw-text
+        # pattern must still catch the adjacent spelling.
+        def _boom(_cmd):
+            raise ValueError("simulated tokenizer failure")
+
+        monkeypatch.setattr(security, "normalize_shell_command", _boom)
+        assert _denied_by("ssh localhost id") == self._RULE
