@@ -10263,6 +10263,18 @@ async def _run_chat(
         # No turn cap by design: the model decides when to stop, and the user's
         # Stop button stays the hard breaker. The finally block's dequeue loop
         # picks this up and dispatches it.
+        #
+        # `answered` decides WHICH body is sent. A turn that produced its own
+        # answer despite the block did not end early, so telling it to "continue
+        # where you left off" makes it answer the same question a second time —
+        # once per blocked call, each a full billed turn. The reason still has to
+        # be delivered (without steer this turn is its only channel), so the
+        # answered variant carries it as awareness and forbids the restatement
+        # instead of suppressing the turn. `_answer_text` is the turn's own answer
+        # with backend control notices removed; `_produced_visible_output` covers
+        # the paths that reset `assistant_text` after emitting (steer cut,
+        # compaction, clear, agent switch) — the same pair every other
+        # "did this turn say anything" check in this function uses.
         if should_queue_refusal_recovery(
             _refusal_reasons,
             slot._stopping,
@@ -10279,7 +10291,9 @@ async def _run_chat(
                 if _recovery_hint:
                     break
             _recovery_body = build_refusal_recovery_prompt(
-                _refusal_reasons, credential_tool_hint=_recovery_hint
+                _refusal_reasons,
+                credential_tool_hint=_recovery_hint,
+                answered=bool(_answer_text.strip()) or _produced_visible_output,
             )
             if _recovery_body:
                 _queue_recovery(

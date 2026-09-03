@@ -2661,7 +2661,7 @@ def parse_hook_continuations(stdouts: list[str]) -> list[str]:
 
 
 def build_refusal_recovery_prompt(
-    refusals: list[tuple[str, str]], *, credential_tool_hint: str = ""
+    refusals: list[tuple[str, str]], *, credential_tool_hint: str = "", answered: bool = False
 ) -> str:
     """Build the body of an automatic continuation after a recoverable tool refusal.
 
@@ -2686,6 +2686,18 @@ def build_refusal_recovery_prompt(
     different tool) or stop on its own with a reason. The caller prepends
     :data:`REFUSAL_RECOVERY_PREFIX`. Returns "" if there is nothing to recover.
 
+    ``answered`` says the turn ALREADY delivered its own answer despite the block
+    (the model worked around it, or had enough evidence without the blocked call).
+    The premise of the default wording — "the turn ended early, pick up where you
+    left off" — is then false, and acting on it makes the model re-answer a
+    question the user has already read, once per blocked call and at full turn
+    cost. So the body flips to awareness-only: same block reasons, same
+    remediation, but an explicit instruction not to restate the delivered answer.
+    The reason still has to be delivered rather than dropped, because on a backend
+    without mid-turn steer this turn is the ONLY channel for it — without it the
+    model's last word on the subject is kiro-cli's "User denied tool execution",
+    and it will keep attributing the block to the user in later turns.
+
     Lives here (a leaf module that owns the prefix) rather than in context.py so
     chat_runner can import it at module top without a circular import. There is
     deliberately no retry cap: the model decides when to stop, and the user's
@@ -2694,9 +2706,17 @@ def build_refusal_recovery_prompt(
     if not refusals:
         return ""
     lines = [
-        "One or more tool calls in your previous turn were blocked by a Kiro Crew "
-        "safety policy, which ended the turn early. This was NOT a user action — "
-        "do not treat it as a cancellation or interruption by the user.",
+        (
+            "One or more tool calls in your previous turn were blocked by a Kiro "
+            "Crew safety policy. This was NOT a user action — do not treat it as a "
+            "cancellation or interruption by the user. You went on to answer in "
+            "that same turn, so this note is for awareness only."
+            if answered
+            else "One or more tool calls in your previous turn were blocked by a "
+            "Kiro Crew safety policy, which ended the turn early. This was NOT a "
+            "user action — do not treat it as a cancellation or interruption by "
+            "the user."
+        ),
         "",
         "Blocked:",
     ]
@@ -2704,10 +2724,18 @@ def build_refusal_recovery_prompt(
         lines.append(f"  - {title}: {reason}" if reason else f"  - {title}")
     lines += [
         "",
-        "Decide how to proceed: use an allowed alternative (for a shell command, "
-        "a read-only variant), a different tool, or — if the block is correct and "
-        "you genuinely cannot proceed — say so and stop. Otherwise continue the "
-        "task where you left off.",
+        (
+            "Do NOT repeat, restate or re-derive the answer you already gave — the "
+            "user has read it. If the block left a specific gap in that answer, "
+            "fill only the gap (an allowed alternative, a different tool) and say "
+            "what it changed. If the answer stands as given, reply with one short "
+            "line noting the block and stop."
+            if answered
+            else "Decide how to proceed: use an allowed alternative (for a shell "
+            "command, a read-only variant), a different tool, or — if the block is "
+            "correct and you genuinely cannot proceed — say so and stop. Otherwise "
+            "continue the task where you left off."
+        ),
     ]
     # Per-class remediation, de-duplicated across the turn's refusals: several
     # blocked calls in one turn are usually the same wall hit from different
