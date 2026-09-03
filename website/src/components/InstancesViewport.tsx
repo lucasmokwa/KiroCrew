@@ -67,6 +67,16 @@ const REFRESH_MIN_INTERVAL_MS = 10_000
 // absolute per load (see `deadlineRef` below) precisely so that a re-mint
 // arriving inside the window cannot postpone it.
 const PANE_LOAD_TIMEOUT_MS = 15_000
+// How many CONSECUTIVE reactive re-mints one pane may ask for without ever
+// announcing `mc-embedded-ready` in between. The child posts `mc-auth-expired`
+// on EVERY 403 it sees (api/client.ts hands recovery to the hub before it
+// latches its own banner), so a pane whose session cannot be repaired by a
+// fresh token asks forever — one SSH mint per REFRESH_MIN_INTERVAL_MS, for as
+// long as the window stays open. Past this count the reactive path goes quiet
+// and lets the watchdog verdict stand: the user gets the error panel and Retry
+// (which re-mints on demand) instead of an invisible mint storm. Reset by a
+// successful ready announcement, and by Retry.
+const MAX_REACTIVE_REMINTS = 3
 
 /** Parse a ``<int>[hm]`` TTL (e.g. "20h", "30m") to seconds; 0 if unparseable. */
 function ttlToSeconds(ttl: string): number {
@@ -140,6 +150,9 @@ export default function InstancesViewport({ macInset = false }: { macInset?: boo
   const paneChromeRef = useRef<Record<string, boolean>>({})
   const refreshingRef = useRef<Set<string>>(new Set())
   const lastRefreshRef = useRef<Map<string, number>>(new Map())
+  // Consecutive reactive (mc-auth-expired) re-mints per pane with no
+  // `mc-embedded-ready` in between — see MAX_REACTIVE_REMINTS.
+  const reactiveMintsRef = useRef<Map<string, number>>(new Map())
   // Live iframe elements by id, so the parent can postMessage the switcher model
   // into each embedded pane. Set/cleared by the iframe ref cb.
   const iframeRefs = useRef<Map<string, HTMLIFrameElement>>(new Map())
@@ -229,6 +242,15 @@ export default function InstancesViewport({ macInset = false }: { macInset?: boo
         // Force a fresh mint and reload its iframe rather than letting it show
         // the in-pane paste-token banner. No foreground guard here — the active
         // pane is exactly the one the user wants restored.
+        //
+        // Bounded, though: a session a fresh token cannot repair re-asks on
+        // every 403 forever (the child hands off before latching its own
+        // banner), which is one SSH mint every REFRESH_MIN_INTERVAL_MS with
+        // nothing to show for it. Count the asks and go quiet once a pane has
+        // burned MAX_REACTIVE_REMINTS without ever announcing readiness.
+        const asks = (reactiveMintsRef.current.get(id) || 0) + 1
+        reactiveMintsRef.current.set(id, asks)
+        if (asks > MAX_REACTIVE_REMINTS) return
         void refreshToken(id)
       } else if (data.type === 'mc-switch-instance') {
         // The embedded pane's inline switcher asks the parent to flip
@@ -289,6 +311,9 @@ export default function InstancesViewport({ macInset = false }: { macInset?: boo
         // readiness: this is the parent's only proof the pane actually loaded
         // (drives the loading overlay + load watchdog below).
         dispatch(setPaneReady(id))
+        // The pane got somewhere: the reactive budget is about this pane's
+        // CONSECUTIVE failures to load, so a successful load clears it.
+        reactiveMintsRef.current.delete(id)
         postModelToRef.current(id)
       } else if (data.type === 'mc-drag-gaps') {
         // The embedded pane relays the control-free spans of its header so the
@@ -420,6 +445,9 @@ export default function InstancesViewport({ macInset = false }: { macInset?: boo
       // an identical token (setWarm would be a no-op for the iframe src).
       setTimedOut(prev => ({ ...prev, [id]: false }))
       setReloadSeq(prev => ({ ...prev, [id]: (prev[id] || 0) + 1 }))
+      // An explicit user press is a fresh start: re-open the reactive budget so
+      // a pane that recovers on the next token can still self-heal afterwards.
+      reactiveMintsRef.current.delete(id)
       connectMutation.mutate(id)
     },
     [connectMutation],

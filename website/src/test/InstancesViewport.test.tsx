@@ -696,6 +696,53 @@ describe('InstancesViewport', () => {
     expect(screen.getByText(/Loading pane/i)).toBeInTheDocument()
   })
 
+  it('stops re-minting after MAX_REACTIVE_REMINTS unanswered mc-auth-expired asks', async () => {
+    // A pane whose session a fresh token cannot repair posts mc-auth-expired on
+    // EVERY 403 it sees, forever. Without a budget that is one SSH mint every
+    // REFRESH_MIN_INTERVAL_MS for as long as the window stays open — and each
+    // re-mint used to postpone the load watchdog, so the user saw only a
+    // spinner. The reactive path must go quiet and let the verdict stand.
+    mockConnectedCd1()
+    vi.useFakeTimers()
+    try {
+      const store = createTestStore({
+        instances: { warm: { 'cd-1': { port: 7778, token: 'tok' } }, activeId: 'cd-1', mru: ['cd-1'], unread: {}, ready: {} },
+      })
+      renderWithProviders(<InstancesViewport />, { store })
+
+      const expire = async () => {
+        await act(async () => {
+          window.dispatchEvent(
+            new MessageEvent('message', {
+              data: { type: 'mc-auth-expired' },
+              origin: 'http://127.0.0.1:7778',
+            }),
+          )
+        })
+        // Past the per-instance rate guard, so the throttle is never what stops us.
+        await act(async () => { vi.advanceTimersByTime(11_000) })
+      }
+
+      for (let i = 0; i < 6; i++) await expire()
+      expect(vi.mocked(api.refreshInstanceToken).mock.calls.length).toBe(3)
+
+      // A pane that DOES load clears its budget: readiness is proof the mint
+      // worked, so a later genuine expiry must still self-heal.
+      await act(async () => {
+        window.dispatchEvent(
+          new MessageEvent('message', {
+            data: { type: 'mc-embedded-ready', v: 1 },
+            origin: 'http://127.0.0.1:7778',
+          }),
+        )
+      })
+      await expire()
+      expect(vi.mocked(api.refreshInstanceToken).mock.calls.length).toBe(4)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('ignores mc-switch-instance to an unknown target id even from a trusted origin', async () => {
     // The inbound switcher validates the TARGET (known instance OR warm) after
     // resolving the SENDER origin. A trusted pane must NOT be able to flip the
