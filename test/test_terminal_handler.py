@@ -3482,6 +3482,14 @@ class TestTerminalWsIntegration:
         monkeypatch.setattr(terminal, "_sel", lambda: MagicMock())
         monkeypatch.setenv("HOME", str(home))
         monkeypatch.setenv("SHELL", shutil.which("bash") or "/bin/bash")
+        # The profile above runs `history -a` at every prompt, and
+        # `_pty_child_env` forwards the gateway environment wholesale -- it drops
+        # only the Python prefixes, deliberately, so credential-bearing vars
+        # survive into the user's own shell. An operator with `HISTFILE`
+        # exported would therefore have this test append to their real history
+        # file; setting HOME alone does not cover it, because an exported
+        # HISTFILE overrides Bash's $HOME/.bash_history default.
+        monkeypatch.setenv("HISTFILE", str(home / ".bash_history"))
 
         registry: dict = {}
         app = _make_app(registry=registry)
