@@ -1359,32 +1359,134 @@ def test_signing_secret_read_contention_retries_not_ephemeral(tmp_path, monkeypa
 
 
 def test_signing_secret_create_contention_retries_not_ephemeral(tmp_path, monkeypatch) -> None:
-    """A TRANSIENT sharing violation on the EXCLUSIVE-CREATE of the key file must
-    be retried, not degraded to an ephemeral secret.
+    """A TRANSIENT sharing violation on the PUBLISH of the key file must be
+    retried, not degraded to an ephemeral secret.
 
-    On Windows a racer's ``os.open(..., O_CREAT|O_EXCL)`` can hit a sharing
-    violation (``PermissionError`` / WinError 32) while the winner holds the
-    freshly-created file open — landing on ``os.open``, not the read. The
-    create-side companion to ``test_signing_secret_read_contention_retries_not_ephemeral``;
-    reproduced deterministically with the ``os.open`` simulator so it is caught
+    On Windows the publishing link can hit a sharing violation
+    (``PermissionError`` / WinError 32) while another handle holds the
+    destination open — landing on ``os.link``, not the read. The publish-side
+    companion to ``test_signing_secret_read_contention_retries_not_ephemeral``;
+    reproduced deterministically with the ``os.link`` simulator so it is caught
     on the POSIX dev loop.
     """
-    from windows_sim import open_sharing_violation
+    from windows_sim import link_sharing_violation
 
     from kiro_crew.dashboard import token_secret as ts
 
     monkeypatch.setattr("kiro_crew.config.loader.config_dir", lambda: tmp_path)
     key_file = tmp_path / ts._SECRET_KEY_FILE
 
-    # Fault the FIRST exclusive-create of the key file; the retry must succeed.
-    with open_sharing_violation(match=ts._SECRET_KEY_FILE, times=1) as state:
+    # Fault the FIRST publish of the key file; the retry must succeed.
+    with link_sharing_violation(match=ts._SECRET_KEY_FILE, times=1) as state:
         secret = ts._load_or_create_secret()
 
-    assert state["n"] >= 2, "the contended exclusive-create was not retried"
+    assert state["n"] >= 2, "the contended publish was not retried"
     assert key_file.exists(), "key must be persisted after retrying the create"
     on_disk = key_file.read_bytes()
     assert len(on_disk) >= ts._MIN_KEY_BYTES, "retry wrote a short/incomplete key"
     assert secret == on_disk, "must return the persisted key, not an ephemeral one"
+
+
+def test_signing_secret_destination_never_exists_while_incomplete(tmp_path, monkeypatch) -> None:
+    """Regression (Mesh-3720): ``token_signing.key`` must never exist on disk in a
+    partial state, so an interrupted update cannot leave a 0-byte key.
+
+    The old creator opened the DESTINATION with ``O_CREAT|O_EXCL`` and only then
+    wrote the 32 random bytes. Its ``finally`` cleaned up an exception, but a
+    kill has no ``finally``: an update completing during shutdown, or a reboot,
+    that ended the process between the create and the write persisted a 0-byte
+    key. Every later boot then read <32 bytes, exhausted the retry budget and
+    fell back to a fresh ephemeral secret — a dashboard that loads while every
+    signed action fails, and a plain restart cannot fix it because it re-reads
+    the same empty file.
+
+    The fix stages the whole key into a private sibling and publishes it with
+    ``os.link``, so the destination name only ever appears already-complete.
+    This samples the destination on every ``os.write`` that carries key bytes:
+    with the fix it is absent throughout; before it, it is present at 0 bytes.
+    """
+    from kiro_crew.dashboard import token_secret as ts
+
+    monkeypatch.setattr("kiro_crew.config.loader.config_dir", lambda: tmp_path)
+    key_file = tmp_path / ts._SECRET_KEY_FILE
+    assert not key_file.exists()
+
+    # Sizes the destination had at each point a key byte was being written.
+    # ``None`` means "did not exist", which is the only acceptable value.
+    sizes_during_write: list[int | None] = []
+    real_write = os.write
+
+    def _spy(fd, data):  # type: ignore[no-untyped-def]
+        try:
+            sizes_during_write.append(key_file.stat().st_size)
+        except OSError:
+            sizes_during_write.append(None)
+        return real_write(fd, data)
+
+    monkeypatch.setattr(os, "write", _spy)
+    secret = ts._load_or_create_secret()
+    monkeypatch.undo()
+
+    on_disk = key_file.read_bytes()
+    assert secret == on_disk, "returned key must be the persisted one"
+    assert len(on_disk) >= ts._MIN_KEY_BYTES
+
+    partial = [n for n in sizes_during_write if n is not None and n < ts._MIN_KEY_BYTES]
+    assert not partial, (
+        "the destination existed in a partial state during the write "
+        f"(observed sizes {partial}); a kill there would persist a truncated key"
+    )
+
+
+def test_signing_secret_persists_on_a_filesystem_without_hard_links(tmp_path, monkeypatch) -> None:
+    """A volume that cannot hard-link must still get a PERSISTED key.
+
+    The publish step is ``os.link``, which FAT/exFAT and some network mounts
+    reject outright. Degrading those hosts to an ephemeral secret would trade
+    one breakage for another (tokens dying on every restart), so the loader
+    falls back to the historical in-place create once the publish budget is
+    spent.
+    """
+    from windows_sim import link_unsupported
+
+    from kiro_crew.dashboard import token_secret as ts
+
+    monkeypatch.setattr("kiro_crew.config.loader.config_dir", lambda: tmp_path)
+    key_file = tmp_path / ts._SECRET_KEY_FILE
+
+    with link_unsupported(match=ts._SECRET_KEY_FILE) as state:
+        secret = ts._load_or_create_secret()
+
+    assert state["n"] >= 1, "the publish link was never attempted"
+    assert key_file.exists(), "no key was persisted on a link-less filesystem"
+    on_disk = key_file.read_bytes()
+    assert len(on_disk) >= ts._MIN_KEY_BYTES, "persisted a short key"
+    assert secret == on_disk, "returned an ephemeral key instead of the persisted one"
+
+
+def test_signing_secret_publish_leaves_no_staging_file_behind(tmp_path, monkeypatch) -> None:
+    """The staging sibling is this process's private file and must not survive.
+
+    A leftover staging file is inert (the key is published under its own name)
+    but it holds a full copy of the signing secret, so the config directory must
+    contain exactly the key file after a successful publish -- and after a
+    publish this process LOST to a sibling, where its candidate is dropped
+    rather than installed.
+    """
+    from kiro_crew.dashboard import token_secret as ts
+
+    monkeypatch.setattr("kiro_crew.config.loader.config_dir", lambda: tmp_path)
+    key_file = tmp_path / ts._SECRET_KEY_FILE
+
+    secret = ts._load_or_create_secret()
+    assert key_file.read_bytes() == secret
+    assert [p.name for p in tmp_path.iterdir()] == [ts._SECRET_KEY_FILE]
+
+    # Now the losing path: a key already exists, so a second loader must read it
+    # and leave nothing of its own candidate behind.
+    again = ts._load_or_create_secret()
+    assert again == secret, "second loader diverged from the persisted key"
+    assert [p.name for p in tmp_path.iterdir()] == [ts._SECRET_KEY_FILE]
 
 
 def test_signing_secret_binary_write_survives_windows_text_mode(tmp_path, monkeypatch) -> None:
@@ -1457,19 +1559,21 @@ def test_signing_secret_write_failure_cleans_up_incomplete_file(tmp_path, monkey
     """Regression (PR #338 / GPT 5.6 HIGH): a write failure DURING exclusive
     creation must NOT leave a poisoned short key file behind.
 
-    The exclusive creator opens ``token_signing.key`` with ``O_CREAT|O_EXCL``
-    then writes 32 bytes. If that write fails partway (ENOSPC, quota) the file
-    exists but is < 32 bytes. Previously the incomplete file was left on disk:
-    every future boot's fast-path read saw < 32 bytes, the O_EXCL create then
-    hit FileExistsError, the bounded retry budget exhausted, and the gateway
-    fell back to a FRESH ephemeral key on EVERY restart (tokens die on each
-    restart; concurrent gateways cannot validate one another) until a human
+    A creator that writes 32 bytes and fails partway (ENOSPC, quota) must leave
+    NOTHING short or empty where the key belongs. Previously the incomplete file
+    was left on disk: every future boot's fast-path read saw < 32 bytes, the
+    create then hit FileExistsError, the bounded retry budget exhausted, and the
+    gateway fell back to a FRESH ephemeral key on EVERY restart (tokens die on
+    each restart; concurrent gateways cannot validate one another) until a human
     deleted the file by hand.
 
-    The fix removes the creator's OWN incomplete file (guarded by a
-    device+inode identity check so a racing sibling's valid key is never
-    deleted) before degrading to an ephemeral secret, so the NEXT init can
-    create a valid, persisted key.
+    Two mechanisms now hold that invariant. The publish path stages the key in a
+    private sibling, so a failed write never touches the destination at all; the
+    in-place fallback (a filesystem with no hard links) removes the creator's OWN
+    incomplete file, guarded by a device+inode identity check so a racing
+    sibling's valid key is never deleted. This faults EVERY key-persist write, so
+    the loader exhausts the publish budget, reaches the fallback, and has to
+    clean up after itself before degrading to an ephemeral secret.
     """
     from kiro_crew.dashboard import token_secret as ts
 
@@ -1481,11 +1585,15 @@ def test_signing_secret_write_failure_cleans_up_incomplete_file(tmp_path, monkey
     calls = {"n": 0}
 
     def _failing_write(fd, data):  # type: ignore[no-untyped-def]
-        # Fail the FIRST os.write (the key-persist write inside the
-        # exclusive-create path) with ENOSPC; delegate every other write to the
-        # real syscall so the second init below can persist a real key.
-        calls["n"] += 1
-        if calls["n"] == 1:
+        # Fail every KEY-PERSIST write with ENOSPC, identified by its payload
+        # length -- both the staged publish and the in-place fallback write the
+        # key in one 32-byte call. Narrowing by length rather than by call count
+        # leaves pytest's own writes alone AND makes the fault persistent, which
+        # is what drives the loader through the publish retries into the cleanup
+        # path. Every other write delegates, so the second init below can
+        # persist a real key.
+        if len(data) == ts._MIN_KEY_BYTES:
+            calls["n"] += 1
             raise OSError(errno.ENOSPC, "No space left on device")
         return real_write(fd, data)
 
