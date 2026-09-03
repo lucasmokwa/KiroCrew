@@ -259,6 +259,195 @@ class TranscriptReadProjection:
             messages.extend(self._log._read_messages(chained_key))
         return messages or self._log._read_messages(key)
 
+    def read_rotated_messages(self, key: str) -> list[dict]:
+        """Messages size-rotation archived out of *key*'s transcript, oldest first.
+
+        Only ``reason="rotate"`` segments participate: those are the transcript's
+        own head, moved aside verbatim when the file outgrew its byte budget.
+        Every other archive reason (``compact``, ``foreign-dedup``, rewrite
+        drops) is content the product DISCARDED — a rewind, a regenerate, a
+        dedup — and resurfacing it would undo that edit in the reader's view.
+
+        Cached per key on the segment files' stat signature: pagination re-reads
+        the corpus once per page and archives change only on a rotation, so the
+        multi-MB parse must not repeat per scroll step.
+        """
+        facade = _history_facade()
+        adir = facade._archive_dir(self._log._dir)
+        stem = facade._safe_key(key) + facade.ARCHIVE_SEGMENT_DELIMITER
+
+        def _seg_order(p: Path) -> tuple[str, int]:
+            # Same-second segments carry ``-N`` suffixes; lexicographic order
+            # puts ``-10`` before ``-2``, so split the numeric part out.
+            rest = p.name[len(stem) : -len(".jsonl")]
+            stamp, dash, suffix = rest.partition("-")
+            # The stamp itself contains one dash (YYYYMMDD-HHMMSS): re-join,
+            # then look for a SECOND dash carrying the collision counter.
+            if dash:
+                stamp2, dash2, suffix2 = suffix.partition("-")
+                stamp = f"{stamp}-{stamp2}"
+                suffix = suffix2 if dash2 else ""
+            try:
+                n = int(suffix) if suffix else 0
+            except ValueError:
+                n = 0
+            return (stamp, n)
+
+        try:
+            segs = sorted((p for p in adir.glob(f"{stem}*.jsonl")), key=_seg_order)
+        except OSError:
+            return []
+        if not segs:
+            return []
+        sig: list[tuple[str, int, int]] = []
+        for p in segs:
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            sig.append((p.name, st.st_size, st.st_mtime_ns))
+        cache: dict[str, tuple[list[tuple[str, int, int]], list[dict]]] | None = getattr(
+            self, "_rotated_cache", None
+        )
+        if cache is None:
+            cache = {}
+            self._rotated_cache = cache
+        hit = cache.get(key)
+        if hit is not None and hit[0] == sig:
+            return hit[1]
+        rows: list[dict] = []
+        # A transient per-segment read failure must not be CACHED as "no
+        # archived rows": the stat signature of a finished rotation never
+        # changes again, so a poisoned empty entry would outlive the incident
+        # forever — the transcript's head silently unreachable until the next
+        # process restart. Assemble-what-we-can still serves this call, but
+        # only a complete read may be memoized.
+        complete = True
+        for p in segs:
+            try:
+                lines = p.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                _HISTORY_LOGGER.warning("rotated segment unreadable: %s", p.name, exc_info=True)
+                complete = False
+                continue
+            if not lines:
+                continue
+            try:
+                header = json.loads(lines[0])
+            except ValueError:
+                continue
+            if not isinstance(header, dict) or header.get("reason") != "rotate":
+                continue
+            for ln in lines[1:]:
+                if not ln.strip():
+                    continue
+                try:
+                    row = json.loads(ln)
+                except ValueError:
+                    continue
+                if isinstance(row, dict) and "_type" not in row:
+                    rows.append(row)
+        if complete:
+            if not rows:
+                # Segments exist yet no rotate rows parsed — the exact signature
+                # of the live incident where the transcript head went missing.
+                # Loud on purpose: this state should be impossible for a healthy
+                # rotation archive.
+                _HISTORY_LOGGER.warning(
+                    "rotated archive for %s: %d segment(s) matched but 0 rows parsed",
+                    key,
+                    len(segs),
+                )
+            cache[key] = (sig, rows)
+            # One entry per key is enough; a stale key's rows would pin MBs forever.
+            if len(cache) > 8:
+                cache.pop(next(iter(cache)))
+        return rows
+
+    def read_messages_chained_full(self, key: str) -> list[dict]:
+        """`read_messages_chained` plus each key's size-rotated archive head.
+
+        Per chain key the rotated rows PRECEDE the live file's rows — rotation
+        drops the file's head, so segment order (filename timestamp) followed by
+        the surviving file is that key's true chronology, and whole-key blocks
+        are already chronological in chain order. This is the pagination corpus:
+        the index space `before`/`next_before` cursors live in, shared with the
+        fork index path so a rendered row's index resolves to the same message
+        everywhere.
+        """
+        metadata = self._log.get_metadata(key)
+        tab_id = metadata.get("tab_id")
+        keys: list[str] = []
+        if tab_id:
+            with self._log._lock:
+                if self._log._tab_id_index is None:
+                    self._log._rebuild_tab_id_index()
+                index = self._log._tab_id_index or {}
+                keys = list(index.get(tab_id, []))
+        if not keys:
+            keys = [key]
+        messages: list[dict] = []
+        for chained_key in keys:
+            messages.extend(self.read_rotated_messages(chained_key))
+            messages.extend(self._log._read_messages(chained_key))
+        return messages
+
+    def read_rotated_messages_chained(self, key: str) -> list[dict]:
+        """All rotate-archived rows across *key*'s tab chain, chain order."""
+        metadata = self._log.get_metadata(key)
+        tab_id = metadata.get("tab_id")
+        keys: list[str] = []
+        if tab_id:
+            with self._log._lock:
+                if self._log._tab_id_index is None:
+                    self._log._rebuild_tab_id_index()
+                index = self._log._tab_id_index or {}
+                keys = list(index.get(tab_id, []))
+        if not keys:
+            keys = [key]
+        rows: list[dict] = []
+        for chained_key in keys:
+            rows.extend(self.read_rotated_messages(chained_key))
+        return rows
+
+    def chain_mid_rotation(self, key: str) -> bool:
+        """True when any chain member AFTER the first has archive segments.
+
+        The slot-detail fast path advertises the whole archived head as one
+        `next_before` cursor, which is exact only while the archived rows are
+        a contiguous PREFIX of the chained corpus -- i.e. only the first chain
+        member ever rotated. A later member's archive is sandwiched between
+        rows the fast response already carries, so no single cursor can hand
+        it to the client; the caller must serve the true chained corpus
+        instead.
+
+        Stat-only (segment existence, nothing parsed), and conservative on
+        purpose: a non-rotate segment (``compact`` etc.) also answers True,
+        which routes the caller to the always-correct full corpus -- slower,
+        never wrong. The precise filter would cost a parse per segment.
+        """
+        metadata = self._log.get_metadata(key)
+        tab_id = metadata.get("tab_id")
+        keys: list[str] = []
+        if tab_id:
+            with self._log._lock:
+                if self._log._tab_id_index is None:
+                    self._log._rebuild_tab_id_index()
+                index = self._log._tab_id_index or {}
+                keys = list(index.get(tab_id, []))
+        if len(keys) <= 1:
+            return False
+        facade = _history_facade()
+        adir = facade._archive_dir(self._log._dir)
+        for chained_key in keys[1:]:
+            stem = facade._safe_key(chained_key) + facade.ARCHIVE_SEGMENT_DELIMITER
+            try:
+                if next(adir.glob(f"{stem}*.jsonl"), None) is not None:
+                    return True
+            except OSError:
+                continue
+        return False
+
     def _rebuild_tab_id_index(self) -> None:
         """Rebuild the tab-id chain index while the owner lock is held."""
         index: dict[str, list[str]] = {}

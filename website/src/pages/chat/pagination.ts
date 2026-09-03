@@ -23,8 +23,7 @@ export interface PaginateOlderInput {
  *  - `loadingOlder` closes this gate mid-fetch, and the thunk's own `condition`
  *    refuses a second dispatch besides.
  */
-export function shouldPaginateOlder({ loadingOlder, slotHasMore }: PaginateOlderInput): boolean {
-  return !loadingOlder && slotHasMore
+export function shouldPaginateOlder({ loadingOlder, slotHasMore }: PaginateOlderInput): boolean {  return !loadingOlder && slotHasMore
 }
 
 export interface ForkEligibilityInput {
@@ -80,4 +79,39 @@ export interface SearchScopeInput {
  */
 export function searchScopeIsLimited({ slotHasMore, cursorIsForActiveSlot }: SearchScopeInput): boolean {
   return !cursorIsForActiveSlot || slotHasMore
+}
+
+/** Pages the top-of-transcript walk may issue on ONE expression of intent. */
+export const OLDER_WALK_MAX_PAGES_PER_INPUT = 4
+
+/**
+ * Whether the top-of-transcript walk may issue another page.
+ *
+ * The walk exists so "load to the beginning" is not one page per manual climb:
+ * a landing's own compensation moves scrollTop thousands of px, which would
+ * otherwise throw the reader off the near-top gate after every page. So the
+ * walk stays alive while the newest landing postdates the newest input
+ * (`walking`).
+ *
+ * That latch SELF-PERPETUATES: each page it issues produces a landing, which
+ * re-establishes the very condition keeping it alive. One wheel event was
+ * therefore enough to walk an entire multi-megabyte archive with no further
+ * input — a permanent "load previous" spinner and a session that pages while
+ * the user is trying to switch away from it. `sawRealInput` bounds who can
+ * start a walk; only a page BUDGET bounds how far it goes. The budget is per
+ * expression of intent: fresh input refills it, so a reader who keeps climbing
+ * still gets a continuous walk.
+ */
+export function shouldContinueOlderWalk(input: {
+  sawRealInput: boolean
+  nearTop: boolean
+  walking: boolean
+  pagesSinceInput: number
+  maxPages?: number
+}): boolean {
+  const { sawRealInput, nearTop, walking, pagesSinceInput } = input
+  const maxPages = input.maxPages ?? OLDER_WALK_MAX_PAGES_PER_INPUT
+  if (!sawRealInput) return false
+  if (pagesSinceInput >= maxPages) return false
+  return nearTop || walking
 }

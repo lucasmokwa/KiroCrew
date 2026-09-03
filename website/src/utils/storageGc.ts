@@ -19,7 +19,7 @@
  *  translated or reworded entry silently stops collecting that family of keys. */
 const SESSION_PREFIXES = [
   'vc_heights_',
-  'vc_anchor_',
+  'vc_anchor2_',
   'kirocrew:touched-files:',
   'mc-panel-tabs:',
   'mc-activity-open:',

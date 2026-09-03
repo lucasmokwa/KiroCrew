@@ -103,6 +103,33 @@ export function isSelfScroll(
 }
 
 /**
+ * Is a height-sync anchor captured at `capturedScrollTop` still usable now that
+ * the scroller reads `liveScrollTop`?
+ *
+ * A viewport-relative capture consumed after the viewport MOVED corrects the
+ * reader's own scrolling rather than the repricing it was taken for (measured
+ * as a 2706px teleport on the phone rig during a cold-cache walk). scrollTop is
+ * the exact discriminator: a reprice ABOVE the viewport changes where rows sit,
+ * never scrollTop. So unchanged ⇒ the whole delta belongs to the reprice and is
+ * safe to correct HOWEVER LATE it lands; changed ⇒ something else moved the
+ * viewport (a finger, iOS momentum — which keeps moving with no further hard
+ * input, so an input-timestamp gate misses it — or Chromium's native anchoring,
+ * which already absorbed the shift, making the correction a no-op anyway).
+ *
+ * Wall-clock age was the first approximation and failed on the wrong side at
+ * the worst moment: a turn ending is the busiest the main thread gets, so the
+ * consumer runs late, a STILL reader's anchor was dropped, and they paid the
+ * entire reprice as one displacement.
+ */
+export function heightAnchorStillUsable(
+  capturedScrollTop: number,
+  liveScrollTop: number,
+  epsilon: number = SELF_SCROLL_EPSILON,
+): boolean {
+  return Math.abs(liveScrollTop - capturedScrollTop) <= epsilon
+}
+
+/**
  * Distance (px) from the true bottom within which a user scroll RE-ENGAGES
  * follow. Deliberately much tighter than DEFAULT_BOTTOM_THRESHOLD: that 100px
  * band drives the jump-to-bottom pill's visibility, and reusing it for follow

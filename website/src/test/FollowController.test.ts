@@ -11,6 +11,7 @@ import {
   distanceFromBottom,
   bottomTarget,
   isSelfScroll,
+  heightAnchorStillUsable,
   resolveUserScrollStick,
   evaluateAutoPin,
   atBottomEpsilon,
@@ -31,6 +32,27 @@ describe('geometry helpers', () => {
     expect(distanceFromBottom(geom)).toBe(50)
     expect(computeAtBottom(geom, DEFAULT_BOTTOM_THRESHOLD)).toBe(true)
     expect(computeAtBottom({ ...geom, scrollTop: 400 }, DEFAULT_BOTTOM_THRESHOLD)).toBe(false)
+  })
+})
+
+describe('heightAnchorStillUsable', () => {
+  it('honours an anchor the viewport never moved away from, however late', () => {
+    // A reprice ABOVE the viewport moves where rows sit, never scrollTop — so an
+    // unchanged scrollTop means the whole delta belongs to the reprice. A turn
+    // ending is the busiest the main thread gets, so the consumer runs late;
+    // dropping the anchor there made a still reader pay the reprice as one
+    // displacement.
+    expect(heightAnchorStillUsable(1000, 1000)).toBe(true)
+    expect(heightAnchorStillUsable(1000, 1001)).toBe(true) // sub-pixel/rounding
+  })
+
+  it('drops an anchor once the viewport has moved (finger or iOS momentum)', () => {
+    // The delta is contaminated by the reader's own motion; correcting it
+    // corrects their scrolling (2706px teleport on the phone rig). Momentum
+    // keeps moving with NO further hard input, which is why an input-timestamp
+    // gate misses it and a scrollTop comparison does not.
+    expect(heightAnchorStillUsable(1000, 1600)).toBe(false)
+    expect(heightAnchorStillUsable(1000, 400)).toBe(false)
   })
 })
 

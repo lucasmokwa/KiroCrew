@@ -84,6 +84,16 @@ function resumed(store: ReturnType<typeof makeStore>, key = 'A') {
 /** Lets queued microtasks (thunk settle + reducer) run. */
 const flush = () => new Promise<void>((r) => setTimeout(r, 0))
 
+// Pin the NARROW walk page size (100): loadOlderMessages sizes its page by
+// viewport (narrow 100 / desktop 300), and these fixtures hold only 300 rows
+// of history -- the desktop size would drain them in one page and leave
+// nothing for the contiguity assertions.
+window.matchMedia = ((q: string) => ({
+  matches: q.includes('max-width'), media: q, onchange: null,
+  addListener: () => {}, removeListener: () => {},
+  addEventListener: () => {}, removeEventListener: () => {},
+  dispatchEvent: () => false,
+})) as unknown as typeof window.matchMedia
 beforeEach(() => {
   olderSignals = []
   releaseOlder = []

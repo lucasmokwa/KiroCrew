@@ -63,7 +63,22 @@ self.addEventListener('fetch', e => {
 
   // ── Shell navigation: network-first, fall back to cached shell ──────
   e.respondWith(
-    fetch(e.request).catch(() => {
+    fetch(e.request).then(resp => {
+      // Refresh the cached shell on every SUCCESSFUL navigation. The shell
+      // cache was previously written only at install time, so the offline
+      // fallback could serve a shell from an arbitrarily old deploy: with a
+      // stable CACHE_VERSION across redeploys, one flaky navigation (a phone
+      // waking on a tunnel) silently booted a days-old bundle whose hashed
+      // assets still lived in the HTTP cache — a complete time capsule that
+      // fresh deploys never invalidated.
+      if (e.request.mode === 'navigate' && resp.ok) {
+        const copy = resp.clone()
+        e.waitUntil(caches.open(CACHE).then(c => Promise.all([
+          c.put('/', copy.clone()), c.put('/index.html', copy),
+        ])).catch(() => {}))
+      }
+      return resp
+    }).catch(() => {
       // Network failed — serve cached shell for navigation requests so
       // the SPA can boot and show an offline/reconnecting state.
       // For non-navigation requests (sub-resources), return a proper

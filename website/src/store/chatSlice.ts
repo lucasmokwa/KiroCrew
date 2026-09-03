@@ -1,4 +1,5 @@
 import { createSlice, createAsyncThunk, createSelector, type PayloadAction } from '@reduxjs/toolkit'
+import { whenScrollQuiet } from '../lib/scrollQuiet'
 import { api } from '../api/client'
 import { addSlotOptimistic, updateSlot, removeSlotOptimistic, markSlotRead, fetchSlots, slotSurfaceKey, sseSlots, sseConnected } from './dashboardSlice'
 import { resolveDefaultColor } from '../utils/sessionColors'
@@ -1233,6 +1234,14 @@ export const fetchHistory = createAsyncThunk(
  *  with is simply page one of the same pagination `loadOlderMessages` runs. */
 export const OLDER_PAGE_LIMIT = 100
 
+/** Page size for walking BACK through history (loadOlderMessages), distinct
+ * from the slot-open first page. The open page is latency-critical — it is the
+ * slot-switch paint, which is exactly what #5404 bounded — so it stays small.
+ * A back-walk page is read while the walk's own spinner shows and each page
+ * costs a full round trip (painful over a phone tunnel), so bigger pages cut
+ * the walk's dominant cost: a 13-page walk becomes 5. */
+export const OLDER_WALK_PAGE_LIMIT = 300
+
 // Aborts the in-flight older-history fetch, or null when none is running.
 // Module-level because switchSlot must reach a fetch it did not start.
 let _abortLoadOlder: (() => void) | null = null
@@ -1652,12 +1661,18 @@ export const switchSlot = createAsyncThunk<
     // still describes the OUTGOING slot. `slotRun` is keyed per slot, so it
     // answers for the incoming one. Guarded because a partial preloaded state
     // can omit `slotRun` entirely, and throwing here would skip the fetch.
-    const state = (getState() as { chat: ChatState }).chat
-    const streaming = (state.slotRun?.[key]?.state ?? 'idle') !== 'idle'
     // A bounded page is a WINDOW, and unseen server growth can push that window clear
     // of a small cache entirely, so only a slot with nothing painted may be bounded.
-    const cached = state.slotMessages?.[safeKey(key)]?.length ?? 0
     try {
+      // Bounded ONLY for a slot with nothing painted (a fresh switch, boot).
+      // Streaming or painted slots stay unbounded: a bounded page is a WINDOW,
+      // and unseen server growth can push it clear of a small cache entirely —
+      // the shrink contract in chatSlice.boundedRefetchShrink.test.ts pins
+      // this with a live capture. The fresh-slot bound keeps the switch/boot
+      // cost at one page (measured 6.2MB/~1s unbounded vs 0.7MB/57ms bounded).
+      const state = (getState() as { chat: ChatState }).chat
+      const streaming = (state.slotRun?.[key]?.state ?? 'idle') !== 'idle'
+      const cached = state.slotMessages?.[safeKey(key)]?.length ?? 0
       return await fetchSlotDetail(key, streaming || cached > 0 ? undefined : OLDER_PAGE_LIMIT)
     } catch (e) {
       // A thrown error crosses the thunk boundary as `miniSerializeError(e)`,
@@ -2665,6 +2680,18 @@ export const deleteHistorySession = createAsyncThunk(
   async (key: string) => { await api.deleteSession(key); return key },
 )
 
+/** Abort any in-flight older-page fetch. Wired to transcript MOTION: the
+ *  settle gates guard the DISPATCH moment, but a page dispatched during a
+ *  reading pause lands 1-2s later — mid-fling on a phone, where the prepend
+ *  compensation fights the momentum curve (reproduced on the momentum rig as
+ *  ±3000px content jumps during coast). Aborting on motion means a landing
+ *  can only ever commit while the scroller is still; the walk re-dispatches
+ *  when stillness returns. An abort rejection carries no payload, so the
+ *  rejected reducer sets no error flag. */
+export function abortActiveOlderFetch(): void {
+  _abortLoadOlder?.()
+}
+
 export const loadOlderMessages = createAsyncThunk(
   'chat/loadOlder',
   async (_, { getState, rejectWithValue }) => {
@@ -2676,7 +2703,24 @@ export const loadOlderMessages = createAsyncThunk(
     const abort = () => controller.abort()
     _abortLoadOlder = abort
     try {
-      const d = await api.chatSlotDetail(slot, OLDER_PAGE_LIMIT, state.slotOldestIndex, controller.signal)
+      // Landing size is a LAYOUT BURST: on a phone (slow CPU, slow network)
+      // a 300-row landing is a long task during which the anchor
+      // compensation paints late and the reader visibly loses their place
+      // ('突然加载一大堆就不在原来的位置'). Narrow viewports take smaller,
+      // cheaper landings; the walk simply takes more of them.
+      const isNarrow = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+        && window.matchMedia('(max-width: 640px)').matches
+      const walkLimit = isNarrow ? OLDER_PAGE_LIMIT : OLDER_WALK_PAGE_LIMIT
+      const d = await api.chatSlotDetail(slot, walkLimit, state.slotOldestIndex, controller.signal)
+      // LANDING BUFFER: the fetch overlaps the reader's gesture, but the
+      // MUTATION must not -- splicing rows mid-glide races the pre-paint
+      // anchor machinery against the gesture's own pixel-addressed window
+      // recompute (phone rig: kilopixel per-landing jumps whose anchor
+      // consume mis-bound and stood down). Hold the payload until the
+      // scroller has been quiet for a beat; bounded, so a reader who never
+      // pauses still gets the page (see scrollQuiet.ts).
+      await whenScrollQuiet(controller.signal)
+      if (controller.signal.aborted) throw new DOMException('Aborted', 'AbortError')
       return { slot, nextBefore: d.next_before || 0, messages: filterMessages(d.messages || []), hasMore: d.has_more || false, total: d.total || 0 }
     } catch (e) {
       // Rethrow a cancellation so the reducer can tell it from a real failure;
