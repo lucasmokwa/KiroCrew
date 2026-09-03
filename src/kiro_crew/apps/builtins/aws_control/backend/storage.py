@@ -34,14 +34,17 @@ from __future__ import annotations
 
 import json
 import logging
+import mimetypes
 import os
 import re
 import secrets
+import tempfile
 from typing import Any, Optional
 from urllib.parse import quote
 
 from kiro_crew.deploy import engine
 from kiro_crew.deploy.engine import AWSError, _checked, _harden_bucket
+from kiro_crew.security import redact_credentials, redact_exfiltration_urls
 
 logger = logging.getLogger(__name__)
 
@@ -317,8 +320,6 @@ def list_section(
         # other tools): a key embedding a credential or beacon URL must not
         # reach the dashboard verbatim. Same double-pass discipline as every
         # other egress surface.
-        from kiro_crew.security import redact_credentials, redact_exfiltration_urls
-
         name, _ = redact_credentials(name)
         name, _ = redact_exfiltration_urls(name)
         return name
@@ -477,6 +478,33 @@ def list_object_keys(profile: str, region: str, bucket: str, *, account: str) ->
 #: it, and it is better for that to fail with a reason than to move unpinned.
 _MAX_PINNED_TRANSFER_BYTES = 5 * 1024 * 1024 * 1024
 
+#: Content-Type prefixes the upload is allowed to declare. The preview dialog
+#: renders these through a presigned URL in an ``<img>``/``<video>``/``<audio>``/
+#: ``<iframe>``, and a browser only renders inline what the object's stored
+#: Content-Type says it is -- with S3's ``binary/octet-stream`` default, a PDF
+#: downloads instead of showing. Everything else stays on that default ON
+#: PURPOSE: ``text/html`` and ``image/svg+xml`` would make a shared or downloaded
+#: object render as a live document on the bucket origin, script included, when
+#: the same file opened in-app goes through the text preview as inert bytes.
+_INLINE_CONTENT_TYPE_PREFIXES = ("image/", "video/", "audio/")
+_INLINE_CONTENT_TYPES = frozenset({"application/pdf"})
+_INLINE_CONTENT_TYPE_DENY = frozenset({"image/svg+xml"})
+
+
+def inline_content_type(key: str) -> str:
+    """The Content-Type to store for ``key``, or ``""`` to keep S3's default.
+
+    Guessed from the extension and then filtered to the inline-safe set above;
+    a type outside it returns ``""`` rather than the guess, so an ``.html``
+    upload is stored as an opaque blob exactly as it was before previews.
+    """
+    guessed, _ = mimetypes.guess_type(key)
+    if not guessed or guessed in _INLINE_CONTENT_TYPE_DENY:
+        return ""
+    if guessed in _INLINE_CONTENT_TYPES or guessed.startswith(_INLINE_CONTENT_TYPE_PREFIXES):
+        return guessed
+    return ""
+
 
 def put_file(
     profile: str,
@@ -499,6 +527,12 @@ def put_file(
     there can allow the write. The upload would then succeed into a stranger's
     bucket carrying the owner's file. ``--expected-bucket-owner`` is what makes S3
     itself reject that, per request, whatever the policy says.
+
+    The stored Content-Type is guessed from the KEY's extension. Without it S3
+    defaults to ``binary/octet-stream``, and a presigned URL then serves a PDF
+    or a video as a forced download instead of rendering inline — the preview
+    surface depends on the browser trusting this header. An extension
+    ``mimetypes`` cannot place keeps the S3 default rather than guessing.
     """
     size = os.path.getsize(local_path)
     if size > _MAX_PINNED_TRANSFER_BYTES:
@@ -507,19 +541,22 @@ def put_file(
             "single owner-pinned upload; refusing rather than transferring without "
             "the bucket-owner check"
         )
+    args = [
+        "s3api",
+        "put-object",
+        "--bucket",
+        bucket,
+        "--key",
+        section_key(section, key),
+        "--body",
+        local_path,
+    ]
+    content_type = inline_content_type(key)
+    if content_type:
+        args += ["--content-type", content_type]
+    args += ["--expected-bucket-owner", account]
     _checked(
-        [
-            "s3api",
-            "put-object",
-            "--bucket",
-            bucket,
-            "--key",
-            section_key(section, key),
-            "--body",
-            local_path,
-            "--expected-bucket-owner",
-            account,
-        ],
+        args,
         profile,
         action="s3:PutObject",
         timeout=timeout,
@@ -560,6 +597,81 @@ def get_file(
         action="s3:GetObject",
         timeout=timeout,
     )
+
+
+def get_object_head_bytes(
+    profile: str,
+    region: str,
+    bucket: str,
+    section: str,
+    key: str,
+    *,
+    account: str,
+    max_bytes: int,
+) -> tuple[bytes, int]:
+    """The first ``max_bytes`` of ``section/key`` plus the object's FULL size.
+
+    Exists for the gateway-proxied text preview: the browser cannot fetch a
+    presigned URL itself because the bucket carries no CORS configuration, so
+    the gateway reads on its behalf. A ``--range`` bounds the transfer to the
+    preview window — S3 answers with the whole object when it is smaller than
+    the range, which is the desired behaviour, not an error.
+
+    The full size comes from the same response (``ContentRange``'s total,
+    falling back to ``ContentLength``), so the caller can tell a truncated
+    preview from a complete one without a second round trip. Owner-pinned
+    like every other transfer, for :func:`put_file`'s name-reuse reason.
+
+    The CLI only writes to a file, so the bytes stage through a temp file that
+    is removed before returning — nothing of the object outlives the call.
+    """
+    fd, tmp_path = tempfile.mkstemp(prefix="kirocrew-drive-preview-")
+    os.close(fd)
+    try:
+        out = _checked(
+            [
+                "s3api",
+                "get-object",
+                "--bucket",
+                bucket,
+                "--key",
+                section_key(section, key),
+                "--range",
+                f"bytes=0-{max_bytes - 1}",
+                "--expected-bucket-owner",
+                account,
+                "--output",
+                "json",
+                tmp_path,
+            ],
+            profile,
+            action="s3:GetObject",
+            timeout=60,
+        )
+        with open(tmp_path, "rb") as fh:
+            data = fh.read()
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            # The preview must not fail over a leftover temp file.
+            pass
+    try:
+        meta = json.loads(out or "{}") or {}
+    except json.JSONDecodeError:
+        meta = {}
+    size = 0
+    content_range = str(meta.get("ContentRange", ""))
+    if "/" in content_range:
+        try:
+            size = int(content_range.rsplit("/", 1)[1])
+        except ValueError:
+            size = 0
+    if not size:
+        size = int(meta.get("ContentLength", 0) or 0)
+    # A garbled response must not report a shorter object than the bytes in
+    # hand — that would read as "not truncated" on a truncated preview.
+    return data, max(size, len(data))
 
 
 def copy_object(
@@ -1019,3 +1131,96 @@ def usage(profile: str, region: str, bucket: str, *, account: str) -> dict[str, 
         "objects": total_objects,
         "sections": per_section,
     }
+
+
+# --- search -----------------------------------------------------------------
+
+#: One listing window per round-trip. Same client-side pagination the drive's
+#: other walks use; the token loop below is what lets a hit-heavy search stop
+#: without listing the rest of the section.
+_SEARCH_PAGE_ITEMS = 1000
+
+#: How many hits a search hands back before it stops walking. Public because
+#: the search route echoes it in the response and the dashboard interpolates
+#: it into the "showing the first N" notice -- this constant is the ONLY place
+#: the number lives, so changing it never strands a translation.
+SEARCH_MAX_RESULTS = 200
+
+
+def search_keys(
+    profile: str,
+    region: str,
+    bucket: str,
+    section: str,
+    query: str,
+    *,
+    account: str,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Case-insensitive filename search across one section's whole prefix.
+
+    S3 has no server-side substring filter, so this pages ``list-objects-v2``
+    under the section prefix and matches locally — against the ENTIRE
+    section-relative key, not just the basename, so ``reports/2026`` finds a
+    file by its folder as well as its name. Folder placeholders (keys ending
+    in ``/``) are navigation structure, not files, and are skipped.
+
+    Returns ``(results, capped)``. ``capped`` is True when
+    :data:`SEARCH_MAX_RESULTS` hits were collected and the walk stopped EARLY —
+    the remaining pages are never requested, which is what keeps a broad query
+    on a large drive bounded.
+
+    Matching runs on the RAW relative key; the key handed back is run through
+    the same egress redactors as :func:`list_section`, because these names
+    render in the dashboard and can be authored outside this app.
+    """
+
+    def _safe_name(name: str) -> str:
+        name, _ = redact_credentials(name)
+        name, _ = redact_exfiltration_urls(name)
+        return name
+
+    prefix = SECTION_PREFIXES[section]
+    needle = query.lower()
+    results: list[dict[str, Any]] = []
+    token = ""
+    while True:
+        args = [
+            "s3api",
+            "list-objects-v2",
+            "--bucket",
+            bucket,
+            "--prefix",
+            prefix,
+            "--max-items",
+            str(_SEARCH_PAGE_ITEMS),
+            "--expected-bucket-owner",
+            account,
+            "--output",
+            "json",
+        ]
+        if token:
+            args += ["--starting-token", token]
+        out = _checked(args, profile, action="s3:ListBucket", timeout=60)
+        data = json.loads(out or "{}")
+        for obj in data.get("Contents", []) or []:
+            key = obj.get("Key", "")
+            rel = key[len(prefix) :]
+            if not rel or rel.endswith("/"):
+                continue
+            if needle in rel.lower():
+                # ``capped`` means "there were MORE than the cap", so it is
+                # decided by the first match past the cap, not by the cap-th
+                # one: exactly SEARCH_MAX_RESULTS hits is a complete result set
+                # and must not be reported as truncated.
+                if len(results) >= SEARCH_MAX_RESULTS:
+                    return results, True
+                results.append(
+                    {
+                        "key": _safe_name(rel),
+                        "size": obj.get("Size", 0),
+                        "modified": obj.get("LastModified", ""),
+                    }
+                )
+        token = data.get("NextToken", "")
+        if not token:
+            return results, False

@@ -22,6 +22,8 @@ vi.mock('./api', async () => {
       driveBootstrapConfirm: vi.fn(),
       driveList: vi.fn(),
       driveDownload: vi.fn(),
+      drivePreview: vi.fn(),
+      driveSearch: vi.fn(),
       driveMove: vi.fn(),
       driveUpload: vi.fn(),
       driveDelete: vi.fn(),
@@ -2576,5 +2578,212 @@ describe('DrivePage sections: drag and drop', () => {
     })
     const strip = await screen.findByTestId('drive-upload-error')
     expect(strip.textContent).toContain('doomed.md')
+  })
+})
+
+describe('DrivePage sections: preview, rename, search', () => {
+  const listing = {
+    files: [
+      { key: 'photo.png', size: 10, modified: '2026-09-01T00:00:00Z' },
+      { key: 'notes.md', size: 20, modified: '2026-09-01T00:00:00Z' },
+      { key: 'data.bin', size: 30, modified: '2026-09-01T00:00:00Z' },
+    ],
+    folders: [],
+  }
+
+  it('clicking an image name opens the preview with the presigned URL', async () => {
+    stubDrivePresent()
+    vi.mocked(awsControlApi.driveList).mockResolvedValue(listing)
+    vi.mocked(awsControlApi.driveDownload).mockResolvedValue({ url: 'https://signed/photo', expiresSecs: 60 })
+    await renderDrive('drive')
+
+    fireEvent.click((await screen.findAllByTestId('drive-preview-open'))[0])
+    const img = await screen.findByTestId('drive-preview-image')
+    expect(img).toHaveAttribute('src', 'https://signed/photo')
+    // The dialog downloads through the SAME path the row uses, and closes.
+    fireEvent.click(screen.getByTestId('drive-preview-close'))
+    expect(screen.queryByTestId('drive-preview-dialog')).toBeNull()
+  })
+
+  it('a text file previews through the gateway endpoint, with the truncation notice', async () => {
+    // Text goes through the proxy, never a browser fetch of the presigned URL:
+    // the bucket has no CORS config, so that fetch would fail while img tags
+    // (CORS-exempt) succeed — the split is the contract this test pins.
+    stubDrivePresent()
+    vi.mocked(awsControlApi.driveList).mockResolvedValue(listing)
+    vi.mocked(awsControlApi.drivePreview).mockResolvedValue({ content: '# hello', truncated: true })
+    await renderDrive('drive')
+
+    fireEvent.click((await screen.findAllByTestId('drive-preview-open'))[1])
+    expect((await screen.findByTestId('drive-preview-text')).textContent).toBe('# hello')
+    expect(screen.getByTestId('drive-preview-truncated')).toBeTruthy()
+    expect(awsControlApi.drivePreview).toHaveBeenCalledWith(ACCOUNT_ID, 'drive', 'notes.md')
+    expect(awsControlApi.driveDownload).not.toHaveBeenCalled()
+  })
+
+  it('an unpreviewable type says so honestly instead of a broken pane', async () => {
+    stubDrivePresent()
+    vi.mocked(awsControlApi.driveList).mockResolvedValue(listing)
+    await renderDrive('drive')
+
+    fireEvent.click((await screen.findAllByTestId('drive-preview-open'))[2])
+    expect(await screen.findByTestId('drive-preview-fallback')).toBeTruthy()
+    expect(awsControlApi.drivePreview).not.toHaveBeenCalled()
+    expect(awsControlApi.driveDownload).not.toHaveBeenCalled()
+  })
+
+  it('rename is a same-directory move through the move endpoint', async () => {
+    stubDrivePresent()
+    vi.mocked(awsControlApi.driveList).mockResolvedValue({
+      files: [{ key: 'docs/old.md', size: 10, modified: '2026-09-01T00:00:00Z' }],
+      folders: [],
+    })
+    vi.mocked(awsControlApi.driveMove).mockResolvedValue({ moved: true })
+    await renderDrive('drive')
+
+    await chooseFromMenu((await screen.findAllByTestId('drive-more'))[0], 'drive-rename')
+    const input = await screen.findByTestId('drive-rename-input')
+    expect(input).toHaveValue('old.md')
+    fireEvent.change(input, { target: { value: 'new.md' } })
+    fireEvent.click(screen.getByTestId('drive-rename-save'))
+    await waitFor(() =>
+      expect(awsControlApi.driveMove).toHaveBeenCalledWith(ACCOUNT_ID, 'drive', 'docs/old.md', 'docs/new.md'),
+    )
+    // The editor closes on success — the committed name needs no cleanup.
+    await waitFor(() => expect(screen.queryByTestId('drive-rename-row')).toBeNull())
+  })
+
+  it('a rename refused for a live share shows the share-specific sentence inline', async () => {
+    stubDrivePresent()
+    vi.mocked(awsControlApi.driveList).mockResolvedValue({
+      files: [{ key: 'shared.md', size: 10, modified: '2026-09-01T00:00:00Z' }],
+      folders: [],
+    })
+    vi.mocked(awsControlApi.driveMove).mockRejectedValue(new AwsControlError('share_active', 409))
+    await renderDrive('drive')
+
+    await chooseFromMenu((await screen.findAllByTestId('drive-more'))[0], 'drive-rename')
+    fireEvent.change(await screen.findByTestId('drive-rename-input'), { target: { value: 'renamed.md' } })
+    fireEvent.click(screen.getByTestId('drive-rename-save'))
+    const err = await screen.findByTestId('drive-rename-error')
+    // Rename's OWN sentence: the user pressed Rename, so the refusal must not
+    // talk about moving or a destination folder they never chose.
+    expect(err).toHaveTextContent(i18nT('apps.awsControl.console.rename_shared'))
+    expect(err).not.toHaveTextContent(i18nT('apps.awsControl.console.move_shared'))
+  })
+
+  it('a rename that collides with an existing name says so in rename terms', async () => {
+    stubDrivePresent()
+    vi.mocked(awsControlApi.driveList).mockResolvedValue({
+      files: [{ key: 'a.md', size: 10, modified: '2026-09-01T00:00:00Z' }],
+      folders: [],
+    })
+    vi.mocked(awsControlApi.driveMove).mockRejectedValue(new AwsControlError('exists', 409))
+    await renderDrive('drive')
+
+    await chooseFromMenu((await screen.findAllByTestId('drive-more'))[0], 'drive-rename')
+    fireEvent.change(await screen.findByTestId('drive-rename-input'), { target: { value: 'b.md' } })
+    fireEvent.click(screen.getByTestId('drive-rename-save'))
+    const err = await screen.findByTestId('drive-rename-error')
+    expect(err).toHaveTextContent(i18nT('apps.awsControl.console.rename_conflict'))
+  })
+
+  it('a grid tile hides its name (the preview trigger) while its rename editor is open', async () => {
+    stubDrivePresent()
+    vi.mocked(awsControlApi.driveList).mockResolvedValue({
+      files: [{ key: 'a.md', size: 10, modified: '2026-09-01T00:00:00Z' }],
+      folders: [],
+    })
+    await renderDrive('drive')
+    fireEvent.click(await screen.findByTitle('Grid view'))
+    await screen.findByTestId('drive-grid')
+    expect(await screen.findByTestId('drive-grid-preview-open')).toBeTruthy()
+
+    await chooseFromMenu((await screen.findAllByTestId('drive-grid-more'))[0], 'drive-grid-rename')
+    await screen.findByTestId('drive-grid-rename-input')
+    // Opening a preview over the editor would stack two editing contexts.
+    expect(screen.queryByTestId('drive-grid-preview-open')).toBeNull()
+    fireEvent.click(screen.getByTestId('drive-grid-rename-cancel'))
+    expect(await screen.findByTestId('drive-grid-preview-open')).toBeTruthy()
+  })
+
+  it('a media error re-mints the presign, re-arms on each successful load, and falls back on two in a row', async () => {
+    // The download presign is a 60s grant; a clip longer than that 403s
+    // mid-play and the element reports a media error. Re-minting (another
+    // short grant, not a longer one) is the recovery, and it must work for
+    // EVERY expiry a long clip crosses — so a successful load re-arms it.
+    // Two errors with no load between them is a URL that never worked.
+    stubDrivePresent()
+    vi.mocked(awsControlApi.driveList).mockResolvedValue({
+      files: [{ key: 'clip.mp4', size: 10, modified: '2026-09-01T00:00:00Z' }],
+      folders: [],
+    })
+    vi.mocked(awsControlApi.driveDownload)
+      .mockResolvedValueOnce({ url: 'https://signed/1', expiresSecs: 60 })
+      .mockResolvedValueOnce({ url: 'https://signed/2', expiresSecs: 60 })
+      .mockResolvedValueOnce({ url: 'https://signed/3', expiresSecs: 60 })
+    await renderDrive('drive')
+
+    fireEvent.click((await screen.findAllByTestId('drive-preview-open'))[0])
+    const video = await screen.findByTestId('drive-preview-video')
+    expect(video).toHaveAttribute('src', 'https://signed/1')
+    // First expiry: re-mint.
+    fireEvent.error(video)
+    await waitFor(() => expect(screen.getByTestId('drive-preview-video')).toHaveAttribute('src', 'https://signed/2'))
+    expect(awsControlApi.driveDownload).toHaveBeenCalledTimes(2)
+    // The new URL loads -> re-armed; second expiry re-mints again.
+    fireEvent.loadedMetadata(screen.getByTestId('drive-preview-video'))
+    fireEvent.error(screen.getByTestId('drive-preview-video'))
+    await waitFor(() => expect(screen.getByTestId('drive-preview-video')).toHaveAttribute('src', 'https://signed/3'))
+    expect(awsControlApi.driveDownload).toHaveBeenCalledTimes(3)
+    // An error with NO load since the last re-mint is a real failure.
+    fireEvent.error(screen.getByTestId('drive-preview-video'))
+    expect(await screen.findByTestId('drive-preview-fallback')).toBeTruthy()
+    expect(awsControlApi.driveDownload).toHaveBeenCalledTimes(3)
+  })
+
+  it('searching replaces the folder view with whole-section hits, and clearing restores it', async () => {
+    stubDrivePresent()
+    vi.mocked(awsControlApi.driveList).mockResolvedValue(listing)
+    vi.mocked(awsControlApi.driveSearch).mockResolvedValue({
+      results: [{ key: 'docs/deep/report.pdf', size: 55, modified: '2026-09-01T00:00:00Z' }],
+      capped: false,
+      limit: 200,
+    })
+    await renderDrive('drive')
+    await screen.findAllByTestId('drive-file')
+
+    fireEvent.change(screen.getByTestId('drive-search-input'), { target: { value: 'report' } })
+    // Debounced 300ms — waitFor absorbs the timer.
+    const hit = await screen.findByTestId('drive-search-hit')
+    // The FULL relative key, because hits span the whole section.
+    expect(hit.textContent).toContain('docs/deep/report.pdf')
+    expect(awsControlApi.driveSearch).toHaveBeenCalledWith(ACCOUNT_ID, 'drive', 'report')
+    expect(screen.queryByTestId('drive-listing')).toBeNull()
+
+    fireEvent.click(screen.getByTestId('drive-search-clear'))
+    await screen.findAllByTestId('drive-file')
+    expect(screen.queryByTestId('drive-search-results')).toBeNull()
+  })
+
+  it('a capped search says the walk stopped, and the goto action jumps to the folder', async () => {
+    stubDrivePresent()
+    vi.mocked(awsControlApi.driveList).mockResolvedValue(listing)
+    vi.mocked(awsControlApi.driveSearch).mockResolvedValue({
+      results: [{ key: 'docs/deep/report.pdf', size: 55, modified: '2026-09-01T00:00:00Z' }],
+      capped: true,
+      limit: 37,
+    })
+    await renderDrive('drive')
+
+    fireEvent.change(screen.getByTestId('drive-search-input'), { target: { value: 'report' } })
+    // The number in the notice is the SERVER's cap, echoed in the payload —
+    // no locale spells it, so a cap change never strands a translation.
+    expect(await screen.findByTestId('drive-search-capped')).toHaveTextContent('37')
+    // Hit actions sit behind the same labeled overflow the file rows use.
+    await chooseFromMenu(screen.getByTestId('drive-search-more'), 'drive-search-goto')
+    // Search cleared, folder view restored at the hit's directory.
+    await waitFor(() => expect(screen.queryByTestId('drive-search-results')).toBeNull())
+    expect(await screen.findByTestId('drive-crumbs')).toBeTruthy()
   })
 })
