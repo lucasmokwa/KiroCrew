@@ -1114,8 +1114,12 @@ on crash, and starts on boot. Implemented in `src/kiro_crew/service/`.
     with a clear `ServiceInstallError` rather than an uncaught
     `FileNotFoundError`.
   - The gateway runs as `User=$USER Group=$(id -gn)` — kirocrew
-    code never runs under sudo. Only `install` and `systemctl` invocations
-    are elevated.
+    code never runs under sudo. Everything elevated is a stock system
+    program: `install`, `systemctl`, `mkdir`, `rm`, `rmdir` and `test`
+    here, plus the AppArmor step's `apparmor_parser`, `aa-exec`, `setpriv`
+    and trusted system `python3` — see [security](security.md) for why that
+    interpreter is a trusted system one running a constant snippet rather
+    than the venv's.
   - **Environment**: values are captured from the installer's environment
     into the unit's `Environment=` lines at install time
     (`service_environment()` in `service/common.py`) — this is how
