@@ -218,7 +218,9 @@ async def test_poll_authorized_store_write_failure_is_error(tmp_path, monkeypatc
 
     monkeypatch.setattr(service._store, "save", _boom)
     # Approved but unpersistable: error (not authorized), and the login is dropped.
-    assert await service.poll_device(login_id) == {"status": "error"}
+    # The code tells the dashboard not to retry on another transport — the store
+    # itself is the failure, so every flavor would hit it.
+    assert await service.poll_device(login_id) == {"status": "error", "code": "token_store_failed"}
     with pytest.raises(UnknownLoginError):
         await service.poll_device(login_id)
 
