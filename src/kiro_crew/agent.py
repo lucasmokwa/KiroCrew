@@ -2280,7 +2280,9 @@ def build_agent_config(*, gated_off: "frozenset[str] | None" = None) -> dict:
     return config
 
 
-def _refresh_dynamic_fields(config: dict, *, gated_off: "frozenset[str] | None" = None) -> None:
+def _refresh_dynamic_fields(
+    config: dict, *, gated_off: "frozenset[str] | None" = None, fork: bool = False
+) -> None:
     """Update security-critical and dynamic fields in an existing config.
 
     Called when ``kirocrew.json`` already exists so user customizations are
@@ -2290,9 +2292,24 @@ def _refresh_dynamic_fields(config: dict, *, gated_off: "frozenset[str] | None" 
         gated_off: Managed servers whose ``spec_gate`` is closed. Pass the
             caller's snapshot so one rebuild's emit path and its withhold audit
             agree; omitted, it is evaluated here.
+        fork: The config is a crew's private COPY of an owned template
+            (see ``agent_state`` fork lineage). The copy exists precisely so
+            human edits stop landing on the shared file, so three writes that
+            are correct for ``kirocrew.json`` are wrong here and are skipped:
+            the unconditional prompt overwrite (only refreshed while the value
+            is still the machine-shaped ``file://`` pointer), the legacy
+            ``deniedCommands`` strip (on a fork that field IS the user's
+            guardrails, not an old build's injection), and the global
+            ``agent.model`` propagation (a main-agent setting; stamping it on
+            every fork would override the fork's own pin). Everything else —
+            managed MCP commands, security hooks, the data-home pin — applies
+            identically, which is the whole reason forks are refreshed at all.
     """
-    # Prompt URI — always resolve at install time
-    config["prompt"] = f"file://{_prompt_path()}"
+    # Prompt URI — always resolve at install time. On a fork, only while the
+    # value is still the machine-shaped pointer; an inline (human-edited)
+    # prompt is exactly what the fork exists to protect.
+    if not fork or str(config.get("prompt") or "").startswith("file://"):
+        config["prompt"] = f"file://{_prompt_path()}"
 
     # Managed MCP servers — ensure present and up-to-date.
     # Only refresh command/args; preserve user customizations (e.g. autoApprove).
@@ -2417,7 +2434,9 @@ def _refresh_dynamic_fields(config: dict, *, gated_off: "frozenset[str] | None" 
     # Upgrade cleanup: drop the retired deniedCommands/autoAllowReadonly that an
     # older build injected into this existing config, so kiro-cli stops enforcing
     # the stale list ahead of the hooks gate (see _strip_legacy_denied_commands).
-    _strip_legacy_denied_commands(config)
+    # Not on a fork: there the field is the user's own guardrails.
+    if not fork:
+        _strip_legacy_denied_commands(config)
 
     # Merge user-defined kiro_hooks from ~/.kiro/crew/config.json (additive).
     mc_cfg = _load_json(_mc_config_path()) or {}
@@ -2481,7 +2500,7 @@ def _refresh_dynamic_fields(config: dict, *, gated_off: "frozenset[str] | None" 
     # deny_unknown_fields — a spec it rejects wholesale, silently falling back to
     # the default agent.
     mc_model = normalize_agent_model((mc_cfg.get("agent") or {}).get("model"))
-    if mc_model:
+    if mc_model and not fork:
         config["model"] = mc_model
 
     # Ensure kiro-cli uses agent-level mcpServers exclusively (not global
@@ -4664,10 +4683,63 @@ def rebuild_agent_config(*, clean: bool = False) -> Path:
     # are also available for the other (agents↔plugins, skills).
     sync_aim_packages()
 
+    # Keep crews' private template copies (forks of owned templates)
+    # machine-maintained — same reason kirocrew.json itself is refreshed.
+    try:
+        _refresh_forked_templates(gated_off=gated_off)
+    except Exception:
+        logger.debug("forked template refresh failed", exc_info=True)
+
     # Security: sanitize invalid hook keys in agent configs
     repair_agent_configs()
 
     return path
+
+
+def _refresh_forked_templates(*, gated_off: "frozenset[str] | None" = None) -> None:
+    """Refresh machine-maintained fields in every fork of an owned template.
+
+    A fork copies the built-in template verbatim, including plumbing setup
+    recomputes on every run: managed MCP server commands (absolute interpreter
+    paths), security hooks, the data-home pin. Frozen, that plumbing rots
+    silently — a stale interpreter path stops every managed tool from starting.
+    So forks get the same merge-preserving refresh ``kirocrew.json`` gets, in
+    ``fork`` mode (human-edited fields untouched; see _refresh_dynamic_fields).
+
+    Only forks whose origin CHAIN reaches a Kiro Crew-owned template qualify:
+    a fork of a user's custom template inherits no machine plumbing (setup
+    never composes non-owned specs), and refreshing it would stamp kirocrew's
+    prompt and hooks onto an unrelated spec.
+    """
+    forks = agent_state.all_fork_info()
+    if not forks:
+        return
+    owned_names = {Path(f).stem for f in OWNED_KIRO_AGENT_FILES}
+
+    def _origin_is_owned(name: str) -> bool:
+        seen: set[str] = set()
+        while name in forks and name not in seen:
+            seen.add(name)
+            name = forks[name]["forked_from"]
+        return name in owned_names
+
+    agents_dir = kiro_agents_dir_path()
+    for fork_name in sorted(forks):
+        if not _origin_is_owned(fork_name):
+            continue
+        spec_path = agents_dir / f"{fork_name}.json"
+        if not _spec_path_is_safe(spec_path, agents_dir):
+            continue
+        config = _load_json(spec_path)
+        if not isinstance(config, dict):
+            continue
+        try:
+            _refresh_dynamic_fields(config, gated_off=gated_off, fork=True)
+        except Exception:
+            logger.debug("refresh failed for forked template %r", fork_name, exc_info=True)
+            continue
+        agent_state.lift_and_strip_bookkeeping(config, fork_name)
+        _atomic_json_write(spec_path, config)
 
 
 # Backward-compat alias — callers may still use the old name.

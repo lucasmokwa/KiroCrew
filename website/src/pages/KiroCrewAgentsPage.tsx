@@ -23,6 +23,8 @@ import CrewWakeSection from '../components/CrewWakeSection'
 import CrewWebhookSection from '../components/CrewWebhookSection'
 import CrewEditorRail from '../components/crew/CrewEditorRail'
 import CrewOverviewPane from '../components/crew/CrewOverviewPane'
+import AgentTemplateDetail from '../components/crew/AgentTemplateDetail'
+import { useAgentTemplatePaneEnabled } from '../hooks/useAgentTemplatePane'
 import { useCrewEditorSections, type CrewPaneKey } from '../components/crew/crewEditorSections'
 import { wakesCrew, crewWakeQueryKey, crewWebhooksQueryKey, webhookBoundToCrew, webhookCanCallIn } from '../components/crew/wakesCrew'
 import type { CronJob } from '../types'
@@ -30,6 +32,7 @@ import type { KiroCrewAgent } from '../components/AgentSelector'
 import { SourceBadge } from '../components/SourceBadge'
 import { errMessage } from '../utils/thunkError'
 import { EFFORT_LEVELS, effortLabel, modelSupportsEffort } from '../lib/effort'
+import { templateSourceBadge, type TemplateProvenance } from '../lib/templateSource'
 
 import { i18nT } from '../i18n/t'
 import ErrorNotice from '../components/ErrorNotice'
@@ -280,13 +283,23 @@ function withCurrent(opts: string[], cur: string): string[] {
  * SAME control rather than two copies that drift. Create composes them through
  * `BindingFields`; the editor mounts them individually, one per rail pane.
  */
-export function TemplateField({ label, options, value, onChange }: {
+export function TemplateField({ label, options, value, onChange, provenance }: {
   label: string; options: string[]; value: string; onChange: (v: string) => void
+  /** Provenance per template name, for the source label on each row. Absent while
+   *  the installed list is still loading, which just means no labels yet. */
+  provenance?: Record<string, TemplateProvenance>
 }) {
+  const opts = withCurrent(options, value)
   return (
     <Field label={label} hint={i18nT('pages.kiroCrewAgentsPage.the_agent_definition_it_boots_from_tools_mcp_ser')}>
       <SimpleSelect
-        options={withCurrent(options, value)}
+        options={opts}
+        optionBadges={opts.map(o => {
+          const p = provenance?.[o]
+          const label = templateSourceBadge(p)
+          return label ? { label, source: p?.source ?? '' } : undefined
+        })}
+        labelsInListOnly
         value={value}
         onChange={onChange}
         triggerFallback={i18nT('pages.kiroCrewAgentsPage.select_an_agent_template')}
@@ -499,20 +512,21 @@ export function SessionColorField({ value, onChange }: { value: string; onChange
 
 /** The create form's binding block. */
 function BindingFields({
-  templateLabel, kiroAgentOptions, kiroAgent, setKiroAgent,
+  templateLabel, kiroAgentOptions, kiroAgent, setKiroAgent, templateProvenance,
   workspaceOptions, workspace, setWorkspace, onNewWorkspace,
   memoryStoreOptions, memoryStore, setMemoryStore,
   modelOptions, model, setModel,
 }: {
   templateLabel: string
   kiroAgentOptions: string[]; kiroAgent: string; setKiroAgent: (v: string) => void
+  templateProvenance?: Record<string, TemplateProvenance>
   workspaceOptions: string[]; workspace: string; setWorkspace: (v: string) => void; onNewWorkspace: () => void
   memoryStoreOptions: string[]; memoryStore: string; setMemoryStore: (v: string) => void
   modelOptions?: string[]; model?: string; setModel?: (v: string) => void
 }) {
   return (
     <>
-      <TemplateField label={templateLabel} options={kiroAgentOptions} value={kiroAgent} onChange={setKiroAgent} />
+      <TemplateField label={templateLabel} options={kiroAgentOptions} value={kiroAgent} onChange={setKiroAgent} provenance={templateProvenance} />
       <WorkspaceField options={workspaceOptions} value={workspace} onChange={setWorkspace} onNewWorkspace={onNewWorkspace} />
       <MemoryStoreField options={memoryStoreOptions} value={memoryStore} onChange={setMemoryStore} />
       {modelOptions && setModel && model !== undefined && (
@@ -701,7 +715,23 @@ export default function KiroCrewAgentsPage({ embedded }: { embedded?: boolean } 
     queryKey: ['agents-installed'],
     queryFn: () => api.agentsInstalled(),
   })
-  const kiroAgentOptions = Array.isArray(installedAgents) ? installedAgents.map((x: { name: string }) => x.name).filter(Boolean) : ['kirocrew']
+  // Private fork copies (blueprint semantics: one crew's own definition) are
+  // not offered as bindable templates — a copy named after crew A means
+  // nothing in crew B's dropdown. The edit sheet re-adds the CURRENT binding
+  // below when it is the editing crew's own copy, same pattern as a pinned
+  // model missing from the advertised list.
+  const kiroAgentOptions = Array.isArray(installedAgents)
+    ? installedAgents
+      .filter((x: { name: string; private_to?: string }) => Boolean(x.name) && !x.private_to)
+      .map((x: { name: string }) => x.name)
+    : ['kirocrew']
+  const templateProvenance: Record<string, TemplateProvenance> = Array.isArray(installedAgents)
+    ? Object.fromEntries(
+      installedAgents
+        .filter((x: { name: string }) => Boolean(x.name))
+        .map((x: TemplateProvenance & { name: string }) => [x.name, x]),
+    )
+    : {}
 
   const { data: workspacesData, refetch: refetchWorkspaces } = useQuery({
     queryKey: ['workspaces'],
@@ -719,6 +749,7 @@ export default function KiroCrewAgentsPage({ embedded }: { embedded?: boolean } 
   // picker so the list is fetched once. INHERIT_MODEL leads so "no pin" is the
   // obvious choice rather than an absent option.
   const availableModels = useAvailableModels()
+  const templatePaneEnabled = useAgentTemplatePaneEnabled()
   const modelOptions = [
     INHERIT_MODEL,
     ...(availableModels || []).map((m: { name: string }) => m.name).filter((n: string) => n && n !== INHERIT_MODEL),
@@ -1295,6 +1326,7 @@ export default function KiroCrewAgentsPage({ embedded }: { embedded?: boolean } 
                   <BindingFields
                     templateLabel={provider.labels.agentTemplateField}
                     kiroAgentOptions={kiroAgentOptions} kiroAgent={kiroAgent} setKiroAgent={setKiroAgent}
+                    templateProvenance={templateProvenance}
                     workspaceOptions={workspaceOptions} workspace={workspace} setWorkspace={setWorkspace}
                     onNewWorkspace={() => setWsModalOpen(true)}
                     memoryStoreOptions={memoryStoreOptions} memoryStore={memoryStore} setMemoryStore={setMemoryStore}
@@ -1345,12 +1377,38 @@ export default function KiroCrewAgentsPage({ embedded }: { embedded?: boolean } 
                   )}
 
                   {pane === 'template' && (
-                    <TemplateField
-                      label={provider.labels.agentTemplateField}
-                      options={kiroAgentOptions}
-                      value={kiroAgent}
-                      onChange={setKiroAgent}
-                    />
+                    <>
+                      {templatePaneEnabled ? (
+                        /* The panel owns the selector: the template picker is
+                           the header bar of the container holding the
+                           definition it names (v5 design, usability-reviewed).
+                           The crew's private copy is filtered from the shared
+                           catalog; the panel re-adds the current binding when
+                           needed. */
+                        <AgentTemplateDetail
+                          template={kiroAgent}
+                          models={(availableModels || []).map((m: { name: string }) => m.name).filter(Boolean)}
+                          crew={editing || undefined}
+                          onForked={setKiroAgent}
+                          options={kiroAgentOptions}
+                          onSelect={setKiroAgent}
+                          provenance={templateProvenance}
+                          fieldLabel={provider.labels.agentTemplateField}
+                        />
+                      ) : (
+                        <TemplateField
+                          label={provider.labels.agentTemplateField}
+                          options={
+                            kiroAgent && !kiroAgentOptions.includes(kiroAgent)
+                              ? [kiroAgent, ...kiroAgentOptions]
+                              : kiroAgentOptions
+                          }
+                          value={kiroAgent}
+                          onChange={setKiroAgent}
+                          provenance={templateProvenance}
+                        />
+                      )}
+                    </>
                   )}
 
                   {pane === 'model' && (

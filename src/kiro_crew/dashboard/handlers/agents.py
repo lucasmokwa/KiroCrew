@@ -22,6 +22,7 @@ from kiro_crew.acp.client import advertised_model_ids, model_is_unusable
 from kiro_crew.acp_backends import selectable_backend_values
 from kiro_crew.agent import (
     AGENT_FILENAME,
+    OWNED_KIRO_AGENT_FILES,
     _spec_path_is_safe,
     clear_model_pin,
     emission_eligible_mcp_servers,
@@ -2228,6 +2229,226 @@ async def api_slash_commands(request: web.Request) -> web.Response:
     )
 
 
+# A published template's filename is its permanent identity (no rename), so the
+# name is validated up front. Same charset the fork sanitizer produces, plus a
+# length cap that keeps the filename portable.
+_TEMPLATE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$")
+
+
+async def api_agent_fork(request: web.Request) -> web.Response:
+    """POST /api/agents/detail/{name}/fork — give one crew a private copy of a template.
+
+    Blueprint semantics: a crew's definition edits must not mutate the shared
+    template file that other crews (and kiro-cli) read. The first edit forks a
+    copy named after the crew, records lineage in the agent_state sidecar (the
+    spec itself cannot carry it — kiro-cli rejects unknown fields and drops the
+    whole agent), and rebinds the crew. All of it happens under the config lock
+    so the agents sync loop can never observe the new file unbound and
+    auto-create a ghost agent for it.
+    """
+    name = request.match_info["name"]
+    denied = await _require_owner(request, "agent_detail.fork")
+    if denied is not None:
+        return denied
+    try:
+        body = await request.json()
+    except ValueError:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "body must be a JSON object"}, status=400)
+    crew = body.get("crew")
+    if not isinstance(crew, str) or not crew.strip():
+        return web.json_response({"error": "crew is required"}, status=400)
+    crew = crew.strip()
+
+    state: DashboardState = request.app["state"]
+    async with _get_config_lock():
+        agents_dir = kiro_agents_dir_path()
+
+        def _load_specs() -> tuple[dict[str, Any] | None, str, set[str]]:
+            """Find the source spec and every name the copy's must not collide with."""
+            source: dict[str, Any] | None = None
+            source_name = name
+            taken: set[str] = set()
+            for f in sorted(agents_dir.glob("*.json")):
+                # An unreadable spec still occupies its filename.
+                taken.add(f.stem)
+                spec = _read_agent_spec(f, operation="api_agent_fork", source="dashboard")
+                if spec is None:
+                    continue
+                declared = spec_str(spec, "name")
+                if declared:
+                    taken.add(declared)
+                if source is None and (declared == name or f.stem == name):
+                    source = spec
+                    source_name = declared or f.stem
+            return source, source_name, taken
+
+        source, source_name, taken = await asyncio.to_thread(_load_specs)
+        if source is None:
+            return web.json_response({"error": f"Template '{name}' not found"}, status=404)
+
+        cfg = await asyncio.to_thread(KiroCrewConfig.load)
+        if crew not in cfg.agents:
+            return web.json_response({"error": f"Agent '{crew}' not found"}, status=404)
+        agent = cfg.agents[crew]
+
+        # Already this crew's own copy: nothing to fork. Idempotence keeps the
+        # frontend's fork-before-first-edit call safe to repeat.
+        fork = agent_state.get_fork_info(source_name)
+        if fork and fork["private_to"] == crew:
+            return web.json_response({"ok": True, "template": source_name, "already_private": True})
+
+        # The copy is named after the crew — the fork is invisible, so there is
+        # no naming step, and the crew's name is the one the user already knows.
+        # Sanitized because crew names are free text and this becomes a filename
+        # (a template's permanent identity; there is no rename). The declared
+        # "name" is set equal to the stem below, which is what keeps discovery's
+        # package-filename guess from misreading a dashed copy name.
+        base = re.sub(r"[^A-Za-z0-9_.-]+", "-", crew).strip("-.") or "agent"
+        copy_name = base
+        suffix = 2
+        while copy_name in taken:
+            copy_name = f"{base}-{suffix}"
+            suffix += 1
+
+        data = dict(source)
+        data["name"] = copy_name
+        # Same rule as every other spec writer: bookkeeping keys never reach a
+        # kiro spec (deny_unknown_fields drops the whole agent).
+        await asyncio.to_thread(agent_state.lift_and_strip_bookkeeping, data, copy_name)
+        dest = agents_dir / f"{copy_name}.json"
+        dest.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+        # Lineage + model tracking recorded before the rebind is persisted, so
+        # no window exists where the copy is bound but unrecorded (the setup
+        # refresh loop and the pane's provenance line both read this).
+        agent_state.set_fork_info(copy_name, forked_from=source_name, private_to=crew)
+        managed = agent_state.get_model_managed(source_name)
+        if managed is not None:
+            agent_state.set_model_managed(copy_name, managed)
+
+        agent.kiro_agent = copy_name
+        cfg.save()
+    clear_list_agents_cache()
+    state.push_refresh("agents")
+    return web.json_response(
+        {"ok": True, "template": copy_name, "filename": dest.name, "forked_from": source_name}
+    )
+
+
+async def api_agent_publish(request: web.Request) -> web.Response:
+    """POST /api/agents/detail/{name}/publish — save a crew's private copy as a named template.
+
+    The counterpart of the invisible fork: forking never asks for a name, so
+    the one place a template name is ever chosen is here, deliberately, by the
+    user. Publishes {name} (which must be *crew*'s private copy) under the
+    caller-supplied new name with NO fork lineage — a real, shareable template —
+    rebinds the crew to it, and removes the superseded private copy. A filename
+    is a template's permanent identity (there is no rename), which is why the
+    name is validated and collision-refused rather than suffixed.
+    """
+    name = request.match_info["name"]
+    denied = await _require_owner(request, "agent_detail.publish")
+    if denied is not None:
+        return denied
+    try:
+        body = await request.json()
+    except ValueError:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "body must be a JSON object"}, status=400)
+    crew = body.get("crew")
+    new_name = body.get("name")
+    if not isinstance(crew, str) or not crew.strip():
+        return web.json_response({"error": "crew is required"}, status=400)
+    if not isinstance(new_name, str) or not _TEMPLATE_NAME_RE.match(new_name.strip()):
+        return web.json_response(
+            {
+                "error": "name must be 1-63 letters, digits, dots, dashes or underscores",
+                "code": "invalid_template_name",
+            },
+            status=400,
+        )
+    crew = crew.strip()
+    new_name = new_name.strip()
+    if f"{new_name}.json" in OWNED_KIRO_AGENT_FILES:
+        return web.json_response(
+            {"error": f"'{new_name}' is reserved", "code": "template_name_reserved"}, status=400
+        )
+
+    state: DashboardState = request.app["state"]
+    async with _get_config_lock():
+        agents_dir = kiro_agents_dir_path()
+
+        def _load_specs() -> tuple[dict[str, Any] | None, str, set[str]]:
+            source: dict[str, Any] | None = None
+            source_name = name
+            taken: set[str] = set()
+            for f in sorted(agents_dir.glob("*.json")):
+                taken.add(f.stem)
+                spec = _read_agent_spec(f, operation="api_agent_publish", source="dashboard")
+                if spec is None:
+                    continue
+                declared = spec_str(spec, "name")
+                if declared:
+                    taken.add(declared)
+                if source is None and (declared == name or f.stem == name):
+                    source = spec
+                    source_name = declared or f.stem
+            return source, source_name, taken
+
+        source, source_name, taken = await asyncio.to_thread(_load_specs)
+        if source is None:
+            return web.json_response({"error": f"Template '{name}' not found"}, status=404)
+        if new_name in taken:
+            return web.json_response(
+                {"error": f"A template named '{new_name}' already exists", "code": "name_taken"},
+                status=409,
+            )
+
+        cfg = await asyncio.to_thread(KiroCrewConfig.load)
+        if crew not in cfg.agents:
+            return web.json_response({"error": f"Agent '{crew}' not found"}, status=404)
+        # Only a private copy can be published: publishing a template that is
+        # already shared would silently duplicate it, and publishing another
+        # crew's copy would leak their customization.
+        fork = agent_state.get_fork_info(source_name)
+        if not fork or fork["private_to"] != crew:
+            return web.json_response(
+                {
+                    "error": f"'{source_name}' is not {crew}'s private copy",
+                    "code": "not_a_private_copy",
+                },
+                status=409,
+            )
+
+        data = dict(source)
+        data["name"] = new_name
+        await asyncio.to_thread(agent_state.lift_and_strip_bookkeeping, data, new_name)
+        dest = agents_dir / f"{new_name}.json"
+        dest.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        managed = agent_state.get_model_managed(source_name)
+        if managed is not None:
+            agent_state.set_model_managed(new_name, managed)
+
+        cfg.agents[crew].kiro_agent = new_name
+        cfg.save()
+
+        # The private copy is superseded — remove the file and its sidecar
+        # record so it neither lingers hidden nor keeps a stale fork entry.
+        old_file = agents_dir / f"{source_name}.json"
+        if _spec_path_is_safe(old_file, agents_dir):
+            try:
+                old_file.unlink()
+            except OSError:
+                logger.debug("could not remove superseded copy %r", source_name, exc_info=True)
+        agent_state.prune(source_name)
+    clear_list_agents_cache()
+    state.push_refresh("agents")
+    return web.json_response({"ok": True, "template": new_name, "filename": dest.name})
+
+
 async def api_agent_detail(request: web.Request) -> web.Response:
     """GET/DELETE/PATCH /api/agents/detail/{name} — view, delete, or update agent config."""
     name = request.match_info["name"]
@@ -2644,6 +2865,11 @@ async def _do_agents_sync(request: web.Request) -> web.Response:
                 disc.name not in mc_kiro_agents
                 and disc.name not in cfg.agents
                 and disc.source != "kirocrew"
+                # A fork is one crew's private copy, not a standalone template:
+                # normally its owner's binding puts it in mc_kiro_agents, so this
+                # only fires for an ORPHANED copy (owner crew deleted) — which
+                # must not resurrect as a ghost agent.
+                and not disc.private_to
             ):
                 # EXECUTABLE INVARIANT enforcement (mirrors the seam-boundary
                 # LIVENESS bound in platform.capability_bound —

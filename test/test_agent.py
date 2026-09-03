@@ -5332,3 +5332,179 @@ class TestSelHookRejectedRedaction:
         _sel_hook_rejected("preToolUse", "c" * 250, "denied")
         assert len(events) == 1
         assert events[0].resources == f"event=preToolUse command={'c' * 200}"
+
+
+from contextlib import contextmanager
+
+
+@contextmanager
+def _fork_env(tmp_path: Path):
+    """Patch agent module globals for fork-refresh tests, mirroring _run_install.
+
+    Yields ``(kiro_dir, prompt_path)``. The bundled defaults carry
+    ``hooks={"preToolUse": "audit"}`` and a prompt.md, so a refresh can rewrite
+    hooks and a ``file://`` prompt.
+    """
+    import kiro_crew.agent as agent_mod
+
+    cfg_dir = _bundled_defaults(tmp_path)
+    kiro_dir = tmp_path / "kiro_agents"
+    kiro_dir.mkdir(exist_ok=True)
+    prompt = cfg_dir / "prompt.md"
+    mc_config = tmp_path / "empty_mc_config.json"
+    mc_config.write_text(json.dumps({"agent": {"kiro_hooks_autoimport": False}}))
+    _user_home = tmp_path / "kirocrew_home"
+    patches = [
+        patch.multiple(
+            "kiro_crew.agent",
+            KIRO_AGENTS_DIR=kiro_dir,
+            _BUNDLED_CFG_DIR=cfg_dir,
+            _KIROCREW_BIN="/usr/bin/kirocrew",
+            _MANAGED_MCP_SERVERS=_DEFAULT_MANAGED_MCPS,
+            _KIRO_MCP_JSON=tmp_path / "fake_kiro_mcp.json",
+            _CC_MCP_JSON=tmp_path / "fake_cc_mcp.json",
+        ),
+        patch("kiro_crew.agent._user_dir", lambda: _user_home),
+        patch("kiro_crew.agent._prompt_path", return_value=prompt),
+        patch("kiro_crew.agent._shipped_defaults", return_value=cfg_dir / "defaults.json"),
+        patch("kiro_crew.agent._project_dir", return_value=None),
+        patch("kiro_crew.agent._aim_skill_paths", return_value=[]),
+        patch("kiro_crew.agent.shutil.which", side_effect=lambda c, **kw: c),
+        patch("kiro_crew.agent._mc_config_path", return_value=mc_config),
+    ]
+    with ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
+        yield kiro_dir, prompt
+
+
+class TestForkModeRefresh:
+    """`_refresh_dynamic_fields(..., fork=True)` protects a crew's private copy:
+    an inline prompt and the deniedCommands guardrails are the human's, so they
+    are left alone; a still-machine-shaped `file://` prompt is refreshed."""
+
+    def test_inline_prompt_preserved_in_fork_mode(self, tmp_path: Path):
+        import kiro_crew.agent as agent_mod
+
+        config = {"prompt": "You are a bespoke reviewer.", "mcpServers": {}}
+        with _fork_env(tmp_path):
+            agent_mod._refresh_dynamic_fields(config, gated_off=frozenset(), fork=True)
+
+        assert config["prompt"] == "You are a bespoke reviewer."
+
+    def test_file_uri_prompt_refreshed_in_fork_mode(self, tmp_path: Path):
+        import kiro_crew.agent as agent_mod
+
+        config = {"prompt": "file:///stale/old/prompt.md", "mcpServers": {}}
+        with _fork_env(tmp_path) as (_kiro, prompt):
+            agent_mod._refresh_dynamic_fields(config, gated_off=frozenset(), fork=True)
+
+        assert config["prompt"] == f"file://{prompt}"
+
+    def test_prompt_always_overwritten_when_not_fork(self, tmp_path: Path):
+        import kiro_crew.agent as agent_mod
+
+        config = {"prompt": "human words that would be clobbered", "mcpServers": {}}
+        with _fork_env(tmp_path) as (_kiro, prompt):
+            agent_mod._refresh_dynamic_fields(config, gated_off=frozenset(), fork=False)
+
+        assert config["prompt"] == f"file://{prompt}"
+
+    def test_denied_commands_kept_in_fork_mode(self, tmp_path: Path):
+        import kiro_crew.agent as agent_mod
+
+        config = {
+            "prompt": "inline",
+            "mcpServers": {},
+            "toolsSettings": {"execute_bash": {"deniedCommands": ["curl"]}},
+        }
+        with _fork_env(tmp_path):
+            agent_mod._refresh_dynamic_fields(config, gated_off=frozenset(), fork=True)
+
+        assert config["toolsSettings"]["execute_bash"]["deniedCommands"] == ["curl"]
+
+    def test_denied_commands_stripped_when_not_fork(self, tmp_path: Path):
+        """Control: on a non-fork refresh the legacy guardrails ARE stripped."""
+        import kiro_crew.agent as agent_mod
+
+        config = {
+            "prompt": "inline",
+            "mcpServers": {},
+            "toolsSettings": {"execute_bash": {"deniedCommands": ["curl"]}},
+        }
+        with _fork_env(tmp_path):
+            agent_mod._refresh_dynamic_fields(config, gated_off=frozenset(), fork=False)
+
+        assert "toolsSettings" not in config
+
+
+class TestRefreshForkedTemplates:
+    """`_refresh_forked_templates` refreshes only forks whose forked_from CHAIN
+    reaches an owned template (kirocrew*); forks of custom templates are skipped
+    so kirocrew plumbing is never stamped onto an unrelated spec."""
+
+    def _write_fork(self, kiro_dir: Path, name: str, **extra) -> Path:
+        spec = {"name": name, "prompt": "file:///stale/prompt.md", "mcpServers": {}}
+        spec.update(extra)
+        path = kiro_dir / f"{name}.json"
+        path.write_text(json.dumps(spec), encoding="utf-8")
+        return path
+
+    def test_kirocrew_origin_fork_is_refreshed(self, tmp_path: Path):
+        import kiro_crew.agent as agent_mod
+
+        with _fork_env(tmp_path) as (kiro_dir, prompt):
+            path = self._write_fork(kiro_dir, "my-crew", hooks={"old": "hook"})
+            agent_state.set_fork_info("my-crew", forked_from="kirocrew", private_to="my-crew")
+            agent_mod._refresh_forked_templates(gated_off=frozenset())
+
+        result = json.loads(path.read_text(encoding="utf-8"))
+        assert result["prompt"] == f"file://{prompt}"
+        assert result["hooks"] == {"preToolUse": "audit"}
+        # Managed MCP servers seeded from defaults.
+        assert "kirocrew-cron" in result["mcpServers"]
+        assert "kirocrew-core" in result["mcpServers"]
+
+    def test_custom_origin_fork_is_left_untouched(self, tmp_path: Path):
+        import kiro_crew.agent as agent_mod
+
+        with _fork_env(tmp_path) as (kiro_dir, _prompt):
+            path = self._write_fork(kiro_dir, "cust-crew", hooks={"old": "hook"})
+            agent_state.set_fork_info(
+                "cust-crew", forked_from="user-template", private_to="cust-crew"
+            )
+            agent_mod._refresh_forked_templates(gated_off=frozenset())
+
+        result = json.loads(path.read_text(encoding="utf-8"))
+        # A fork of a non-owned template inherits no machine plumbing.
+        assert result["prompt"] == "file:///stale/prompt.md"
+        assert result["hooks"] == {"old": "hook"}
+        assert result["mcpServers"] == {}
+
+    def test_fork_of_fork_chain_reaching_owned_is_refreshed(self, tmp_path: Path):
+        import kiro_crew.agent as agent_mod
+
+        with _fork_env(tmp_path) as (kiro_dir, prompt):
+            self._write_fork(kiro_dir, "mid")
+            leaf = self._write_fork(kiro_dir, "leaf")
+            agent_state.set_fork_info("mid", forked_from="kirocrew", private_to="c1")
+            agent_state.set_fork_info("leaf", forked_from="mid", private_to="c2")
+            agent_mod._refresh_forked_templates(gated_off=frozenset())
+
+        # The leaf's chain (leaf -> mid -> kirocrew) reaches an owned root.
+        assert json.loads(leaf.read_text(encoding="utf-8"))["prompt"] == f"file://{prompt}"
+
+    def test_cycle_in_chain_does_not_hang_and_skips(self, tmp_path: Path):
+        import kiro_crew.agent as agent_mod
+
+        with _fork_env(tmp_path) as (kiro_dir, _prompt):
+            a = self._write_fork(kiro_dir, "a")
+            b = self._write_fork(kiro_dir, "b")
+            # a -> b -> a: never reaches an owned root; must terminate, not loop.
+            agent_state.set_fork_info("a", forked_from="b", private_to="ca")
+            agent_state.set_fork_info("b", forked_from="a", private_to="cb")
+            agent_mod._refresh_forked_templates(gated_off=frozenset())
+
+        # Neither is refreshed (no owned root); both left as written.
+        assert json.loads(a.read_text(encoding="utf-8"))["prompt"] == "file:///stale/prompt.md"
+        assert json.loads(b.read_text(encoding="utf-8"))["prompt"] == "file:///stale/prompt.md"
