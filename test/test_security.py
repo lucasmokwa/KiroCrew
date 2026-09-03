@@ -4305,6 +4305,161 @@ class TestHomeDirTargetsCache:
         assert len(security._home_targets_cache) <= 33
 
 
+class TestEnvDumpGrepAwsNarrowing:
+    """The env-dump-piped-to-grep deny fires on a credential dump and nothing else.
+
+    The same regex backs two tiers -- the always-on ``_ENV_CRED_PATTERNS`` keystone
+    (checked here through ``is_sensitive_bash_command``) and the disableable
+    ``credential-exfil-env-grep-aws`` catalog rule (checked through its real
+    ``_DenyMatcher``). Both are asserted so a fix on one tier cannot leave the block
+    standing on the other under a different message. The direct-``printenv`` sibling
+    rule is pinned alongside, and every case is also run through the FULL gate: a
+    shape one rule stops refusing while a sibling still refuses it is not fixed.
+    """
+
+    DENIED = (
+        "env | grep AWS_SECRET",
+        "env | grep AWS_",
+        "env | grep -c AWS_",
+        # The bare name with no underscore selects the same variables.
+        "env | grep AWS",
+        "env | grep -i aws",
+        'env | grep "AWS"',
+        "env | grep AWS_ACCESS",
+        "printenv | grep -i aws_session",
+        "set | grep AWS_",
+        "export -p | grep AWS_",
+        "env | sort | grep AWS_",
+        "env | awk '/AWS_/'",
+        "env | sed -n '/AWS_SECRET/p'",
+        # An alternation inside the grep pattern, with the prefix on either side.
+        "/bin/sh -c 'env | grep -E \"^(AWS_|SANDBOX|AIM)\"'",
+        "env | grep -E '^(SANDBOX|AWS_)'",
+        # Inside a command substitution.
+        "echo $(env | grep AWS_SESSION)",
+    )
+
+    ALLOWED = (
+        # A named non-secret variable.
+        "env | grep AWS_REGION",
+        "env | grep AWS_PROFILE",
+        "printenv | grep AWS_DEFAULT_REGION",
+        "env | grep -E '^AWS_PROFILE='",
+        "env | grep AWS_ROLE_ARN",
+        # ``AWS`` inside another identifier is not the prefix.
+        "env | grep MY_AWS_ROLE",
+        # A PARTIAL secret name is deliberately NOT denied by this command-shape
+        # rule: the value it would print is caught by ``redact_credentials``
+        # (AKIA/ASIA + high-entropy detection) before reaching a chat surface, and
+        # denying every non-allowlisted name would re-create the false positives
+        # this rule was narrowed to remove. Pinned so a later "harden" does not
+        # silently widen the selector again.
+        "env | grep AWS_S",
+        "printenv | grep AWS_A",
+        # No filter at all.
+        "env | cut -d= -f1 | sort",
+        "docker exec kirocrew printenv KIROCREW_PORT",
+        # ``env`` / ``set`` as a substring of another word.
+        "grep -rn AWS_REGION src/environment/",
+        "cat .env; grep AWS_ config.py",
+        "unset AWS_PROFILE; grep -r AWS_ src/",
+        "git diff --stat -- settings.py | grep AWS_",
+        # The grep lives in a later statement than the dump.
+        "env | head -5; grep -r AWS_ src/",
+        "set -e; grep AWS_ file.txt",
+    )
+
+    # ``printenv NAME`` prints a value directly -- its own catalog rule, no pipe.
+    PRINTENV_DENIED = (
+        "printenv AWS_SECRET_ACCESS_KEY",
+        "printenv AWS_SESSION_TOKEN",
+        "printenv AWS_ACCESS_KEY_ID",
+        "printenv AWS_REGION AWS_SECRET_ACCESS_KEY",
+    )
+    PRINTENV_ALLOWED = (
+        "printenv AWS_REGION",
+        "printenv AWS_PROFILE AWS_DEFAULT_REGION",
+        "printenv AWS_ROLE_ARN",
+        "printenv MY_AWS_ROLE",
+        "printenv",
+    )
+
+    @staticmethod
+    def _keystone(cmd: str) -> bool:
+        from kiro_crew.security import _check_env_credential_access
+
+        return _check_env_credential_access(cmd) is not None
+
+    @staticmethod
+    def _rule_matcher(rule_id: str):
+        from kiro_crew import security
+
+        rule = next(r for r in security.BUILTIN_DENIED_RULES if r.id == rule_id)
+        return security._deny_matcher(rule.pattern)
+
+    @classmethod
+    def _catalog_matcher(cls):
+        return cls._rule_matcher("credential-exfil-env-grep-aws")
+
+    def test_catalog_rule_and_keystone_share_one_regex(self) -> None:
+        from kiro_crew import security
+
+        rule = next(
+            r for r in security.BUILTIN_DENIED_RULES if r.id == "credential-exfil-env-grep-aws"
+        )
+        assert rule.pattern == security._ENV_DUMP_GREP_AWS_PATTERN
+        assert security._ENV_DUMP_GREP_AWS_PATTERN in [
+            p.pattern for p in security._ENV_CRED_PATTERNS
+        ]
+
+    @pytest.mark.parametrize(
+        "rule_id", ["credential-exfil-env-grep-aws", "credential-exfil-printenv-aws"]
+    )
+    def test_catalog_rule_is_published_not_silently_disabled(self, rule_id: str) -> None:
+        # ``_DenyMatcher`` disables a pattern that fails ``is_safe_user_regex`` with
+        # only a log line, so a rule that never matches looks identical to one that
+        # was narrowed. Assert on the matcher, not on ``re.search``.
+        from kiro_crew.security import is_safe_user_regex
+
+        matcher = self._rule_matcher(rule_id)
+        assert not matcher._disabled
+        assert not matcher._bounded, "must stay on the full-input fragment path"
+        assert is_safe_user_regex(matcher._frag_res[0].pattern)
+
+    @pytest.mark.parametrize("cmd", DENIED)
+    def test_credential_dumps_are_denied_on_both_tiers(self, cmd: str) -> None:
+        assert self._keystone(cmd), cmd
+        assert self._catalog_matcher().match(cmd), cmd
+        assert is_sensitive_bash_command(cmd) is not None, cmd
+
+    @pytest.mark.parametrize("cmd", ALLOWED)
+    def test_benign_commands_pass_both_tiers(self, cmd: str) -> None:
+        assert not self._keystone(cmd), cmd
+        assert not self._catalog_matcher().match(cmd), cmd
+
+    @pytest.mark.parametrize("cmd", PRINTENV_DENIED)
+    def test_printenv_of_a_secret_is_denied(self, cmd: str) -> None:
+        assert self._rule_matcher("credential-exfil-printenv-aws").match(cmd), cmd
+
+    @pytest.mark.parametrize("cmd", PRINTENV_ALLOWED)
+    def test_printenv_of_a_non_secret_passes(self, cmd: str) -> None:
+        assert not self._rule_matcher("credential-exfil-printenv-aws").match(cmd), cmd
+
+    @pytest.mark.parametrize("cmd", DENIED + PRINTENV_DENIED)
+    def test_full_gate_denies(self, cmd: str) -> None:
+        from kiro_crew.security import is_denied
+
+        assert is_denied(cmd) is not None, cmd
+
+    @pytest.mark.parametrize("cmd", ALLOWED + PRINTENV_ALLOWED)
+    def test_full_gate_allows(self, cmd: str) -> None:
+        # The whole gate, not just the two touched tiers: a benign shape that one
+        # rule stops refusing while a sibling rule still refuses it is not fixed.
+        from kiro_crew.security import is_denied
+
+        assert is_denied(cmd) is None, cmd
+
+
 class TestIsSensitiveBashCommand:
     """Tests for is_sensitive_bash_command()."""
 

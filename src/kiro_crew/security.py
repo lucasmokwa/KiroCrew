@@ -91,6 +91,48 @@ class DeniedCommandRule:
     description: str
 
 
+# An environment dump (``env`` / ``printenv`` / ``set`` / ``export -p``) PIPED
+# through a text filter that selects AWS variables. Shared by the disableable
+# ``credential-exfil-env-grep-aws`` rule and the always-on ``_ENV_CRED_PATTERNS``
+# keystone so the two tiers cannot drift apart.
+#
+# Every clause exists to keep a benign command out of the deny:
+# * the dump verb must start a word (``(?<![\w./-])``), so ``environment``,
+#   ``.env``, ``offset``, ``unset`` and ``src/env/`` are not dump verbs;
+# * a ``|`` must follow it within the same statement, so ``env FOO=1 cmd`` (env as
+#   a wrapper) and ``set -e`` never qualify;
+# * the pipeline and the filter argument stop at ``;``/``&``/newline, so a grep in
+#   a LATER statement is not attributed to the dump;
+# * the selected name must be the bare ``AWS``/``AWS_`` prefix (which selects every
+#   AWS variable, secrets included) or a secret-bearing one. Selecting a named
+#   non-secret variable such as ``AWS_REGION`` or ``AWS_PROFILE`` is allowed.
+# The filter's argument span still admits ``|`` so an alternation inside the
+# grep pattern (``grep -E "^(FOO|AWS_)"``) is caught.
+#
+# A PARTIAL secret name (``grep AWS_S``) is deliberately not denied here. This
+# rule is a command-shape speed bump, not the last line: the value a partial
+# match would print is caught by ``redact_credentials`` (AKIA/ASIA and
+# high-entropy detection) before it reaches a chat surface. Widening the
+# selector to "anything not on an allowlist" trades the false-positive
+# reduction this rule exists for against a leak the output layer already
+# stops, so the narrow selector is the intended design.
+#
+# ``AWS_ACCESS`` counts as secret-bearing: ``AWS_ACCESS_KEY_ID`` is half of a
+# key pair and is the name an exfiltrator greps for first.
+_AWS_SECRET_VAR_NAMES = r"(?:SECRET|SESSION|SECURITY|ACCESS)"
+_AWS_VAR_SELECTOR = r"AWS(?:(?![A-Za-z_])|_(?![A-Za-z])|_" + _AWS_SECRET_VAR_NAMES + r")"
+_ENV_DUMP_GREP_AWS_PATTERN = (
+    r"(?<![\w./-])(?:env|printenv|export\s+-p|set)(?:\s[^|;&\n]*)?"
+    r"\|[^;&\n]*(?:grep|awk|sed)\s[^;&\n]*" + _AWS_VAR_SELECTOR
+)
+
+# ``printenv NAME...`` prints the named variables' VALUES, so naming a
+# secret-bearing variable is a credential read. Naming a non-secret one
+# (``printenv AWS_REGION``) is not. The piped form (``printenv | grep ...``) is
+# ``_ENV_DUMP_GREP_AWS_PATTERN``'s job.
+_PRINTENV_AWS_SECRET_PATTERN = r"(?<![\w./-])printenv\s[^;&|\n]*AWS_" + _AWS_SECRET_VAR_NAMES
+
+
 BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
     DeniedCommandRule(
         id="credential-exfil-s3-cp",
@@ -148,11 +190,13 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
     ),
     DeniedCommandRule(
         id="credential-exfil-printenv-aws",
-        pattern=".*printenv.*AWS.*",
+        pattern=_PRINTENV_AWS_SECRET_PATTERN,
         category="credential-exfil",
         description=(
-            "Blocks `printenv` dumping any AWS_* environment variable, which can leak AWS "
-            "credentials held in the environment."
+            "Blocks `printenv` naming a secret-bearing AWS variable (`AWS_SECRET*`, "
+            "`AWS_SESSION*`, `AWS_SECURITY*`, `AWS_ACCESS*`), which prints the credential "
+            "held in the environment. Naming a non-secret variable such as `AWS_REGION` "
+            "is allowed."
         ),
     ),
     DeniedCommandRule(
@@ -294,11 +338,13 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
     ),
     DeniedCommandRule(
         id="credential-exfil-env-grep-aws",
-        pattern=".*env.*grep.*AWS.*",
+        pattern=_ENV_DUMP_GREP_AWS_PATTERN,
         category="credential-exfil",
         description=(
-            "Blocks `env | grep AWS`, which filters the environment for AWS_* variables and "
-            "leaks any credentials stored there."
+            "Blocks piping an environment dump (`env`, `printenv`, `set`, `export -p`) "
+            "through grep/awk/sed for the bare `AWS`/`AWS_` prefix or a secret-bearing AWS "
+            "variable, which leaks any credentials stored there. Selecting a named "
+            "non-secret variable such as `AWS_REGION` is allowed."
         ),
     ),
     DeniedCommandRule(
@@ -14793,11 +14839,10 @@ _ENV_CRED_PATTERNS: list[re.Pattern[str]] = [
         r"declare\s+(?:-[a-zA-Z]+\s+)*-?p\s+AWS_(?:SECRET|SESSION|SECURITY)",
         re.IGNORECASE,
     ),
-    # env / printenv / export -p piped through grep for AWS_ vars
-    re.compile(
-        r"(?:env|printenv|export\s+-p|set)\s*(?:\|.*)?(?:grep|awk|sed)\s+.*AWS_",
-        re.IGNORECASE,
-    ),
+    # env / printenv / export -p / set piped through grep/awk/sed for AWS vars.
+    # Shares its regex with the ``credential-exfil-env-grep-aws`` catalog rule;
+    # the narrowing rationale lives on ``_ENV_DUMP_GREP_AWS_PATTERN``.
+    re.compile(_ENV_DUMP_GREP_AWS_PATTERN, re.IGNORECASE),
     # Direct printenv of sensitive vars
     re.compile(
         r"printenv\s+AWS_(?:SECRET_ACCESS_KEY|SESSION_TOKEN|SECURITY_TOKEN)",
