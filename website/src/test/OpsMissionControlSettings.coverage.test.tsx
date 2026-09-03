@@ -24,6 +24,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor, within, cleanup } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { MemoryRouter } from 'react-router-dom'
 
 import type {
   AutonomyRule,
@@ -155,10 +156,13 @@ function renderPanel() {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   })
+  // MemoryRouter: the mute hint renders an inline <SettingsLink>.
   return render(
-    <QueryClientProvider client={client}>
-      <SettingsPanel />
-    </QueryClientProvider>,
+    <MemoryRouter>
+      <QueryClientProvider client={client}>
+        <SettingsPanel />
+      </QueryClientProvider>
+    </MemoryRouter>,
   )
 }
 

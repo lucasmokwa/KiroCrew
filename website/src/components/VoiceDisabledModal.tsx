@@ -2,7 +2,10 @@ import { Mic } from 'lucide-react'
 import Modal from './Modal'
 import { Btn } from './ui'
 
+import type { MouseEvent } from 'react'
+import { Trans } from 'react-i18next'
 import { i18nT } from '../i18n/t'
+import { SettingsLink } from './SettingsLink'
 interface Props {
   /** Whether the modal is open */
   open: boolean
@@ -34,6 +37,15 @@ interface Props {
  */
 export default function VoiceDisabledModal({ open, reason = 'disabled', provider = '', onClose, onOpenSettings }: Props) {
   const unavailable = reason === 'unavailable'
+  // Both branches link the tab the same way. A plain click takes the same
+  // embed-aware route as the footer button (the host swaps /settings/voice
+  // for /embed/settings in an embedded chat); the href stays for
+  // open-in-new-tab.
+  const linkProps = {
+    tab: 'voice' as const,
+    className: 'text-accent font-medium hover:underline',
+    onClick: (e: MouseEvent<HTMLAnchorElement>) => { e.preventDefault(); onOpenSettings() },
+  }
   return (
     <Modal
       open={open}
@@ -61,8 +73,13 @@ export default function VoiceDisabledModal({ open, reason = 'disabled', provider
           </p>
           <p className="text-muted">
             {unavailable
-              ? i18nT('components.voiceDisabledModal.pick_an_installed_provider_under_settings_voice')
-              : <>{i18nT('components.voiceDisabledModal.enable_it_under')} <span className="text-text font-medium">{i18nT('components.voiceDisabledModal.settings_voice')}</span>{i18nT('components.voiceDisabledModal.then_click_the_mic_to_dictate_into_the_message_b')}</>}
+              ? (
+                <Trans
+                  i18nKey="components.voiceDisabledModal.pick_an_installed_provider_under_settings_voice"
+                  components={[<SettingsLink key="l" {...linkProps} />]}
+                />
+              )
+              : <>{i18nT('components.voiceDisabledModal.enable_it_under')} <SettingsLink {...linkProps}>{i18nT('components.voiceDisabledModal.settings_voice')}</SettingsLink>{i18nT('components.voiceDisabledModal.then_click_the_mic_to_dictate_into_the_message_b')}</>}
           </p>
         </div>
       </div>

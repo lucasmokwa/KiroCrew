@@ -419,6 +419,7 @@ function AccountsPane({ accountsQ, selected, onUse }: {
   onUse: (account: AwsAccount) => void
 }) {
   const [query, setQuery] = useState('')
+  const navigate = useNavigate()
   const data = accountsQ.data
 
   // Client-side filter over name + id; harmless when few accounts.
@@ -514,6 +515,11 @@ function AccountsPane({ accountsQ, selected, onUse }: {
             icon={<Cloud />}
             title={i18nT('apps.awsControl.page.empty_title')}
             subtitle={i18nT('apps.awsControl.page.empty_body')}
+            action={
+              <Btn onClick={() => navigate('/deploy')} data-testid="aws-control-open-deploy">
+                {i18nT('apps.awsControl.page.open_deploy')}
+              </Btn>
+            }
           />
         </div>
       )}

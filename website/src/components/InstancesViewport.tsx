@@ -33,7 +33,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, Loader2, RefreshCw } from 'lucide-react'
+import { Trans } from 'react-i18next'
 import { api } from '../api/client'
+import { SettingsLink } from './SettingsLink'
 import { useAppDispatch, useAppSelector } from '../store'
 import { removeWarm, setActiveId, setPaneReady, setUnread, setWarm } from '../store/instancesSlice'
 import InstanceTabBar, { visibleInstanceTabs, useCrewPins, toggleCrewPin, useCrewSwitcherStableOrder, setStableOrder } from './InstanceTabBar'
@@ -733,7 +735,10 @@ export default function InstancesViewport({ macInset = false }: { macInset?: boo
                 />
               )}
               <div className="text-[11px] text-muted">
-                {i18nT('components.instancesViewport.this_tab_stays_until_you_disconnect_the_instance')}
+                <Trans
+                  i18nKey="components.instancesViewport.this_tab_stays_until_you_disconnect_the_instance"
+                  components={[<SettingsLink key="l" tab="instances" />]}
+                />
               </div>
             </div>
           </div>

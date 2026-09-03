@@ -16,7 +16,14 @@ import type { SettingsTarget } from './settingsPath'
 export interface SettingsLinkProps
   extends SettingsTarget,
     Omit<ComponentProps<typeof Link>, 'to'> {
-  children: ReactNode
+  /**
+   * Optional because the react-i18next <Trans> idiom passes the element
+   * self-closing — `components={[<SettingsLink key="l" tab="…" />]}` with
+   * `<0>…</0>` in the catalog value (the englishIdentity gate rejects named
+   * closing tags, and `<link>` is an HTML void element) — and react-i18next
+   * injects the translated fragment as children at render time.
+   */
+  children?: ReactNode
 }
 
 export function SettingsLink({

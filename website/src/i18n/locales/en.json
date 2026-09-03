@@ -1671,7 +1671,7 @@
         "view_rendered": "Rendered"
       },
       "knowledge": {
-        "connectHelp": "Adds this vault to the Knowledge library so agents can search your notes. You can change this later in Settings.",
+        "connectHelp": "Adds this vault to the Knowledge library so agents can search your notes. You can change this later in Agent Capabilities → Knowledge.",
         "label": "Sync to {{productName}} knowledge"
       },
       "manifest": {
@@ -2383,12 +2383,12 @@
         "mcp_available": "Available to add",
         "mcp_desc": "These are the MCP servers installed in {{productName}}. {{name}} can only call the ones added here — press Add to grant one, Remove to take it back. Built-in servers are always available and cannot be removed.",
         "mcp_disabled": "Disabled",
-        "mcp_empty": "No MCP servers are configured yet. Add one in {{productName}} Settings → MCP, then reopen this panel.",
-        "mcp_error_disabled": "This server is disabled. Enable it in {{productName}} Settings → MCP first.",
+        "mcp_empty": "No MCP servers are configured yet. Add one in {{productName}} Agent Capabilities → Connections, then reopen this panel.",
+        "mcp_error_disabled": "This server is disabled. Enable it in {{productName}} Agent Capabilities → Connections first.",
         "mcp_error_generic": "Couldn't load tools — try again.",
         "mcp_error_in_progress": "Already discovering tools — hold on.",
         "mcp_error_not_found": "This server is no longer configured.",
-        "mcp_error_probe_failed": "This server didn't respond. Check its command in {{productName}} Settings → MCP.",
+        "mcp_error_probe_failed": "This server didn't respond. Check its command in {{productName}} Agent Capabilities → Connections.",
         "mcp_from_cache": "(cached — may be stale)",
         "mcp_loading": "Loading servers…",
         "mcp_needs_approval": "Needs approval",
@@ -2912,7 +2912,7 @@
         "syncing": "syncing",
         "the_maximum_this_instance_may_do_a_per_signal_ru": "The maximum this instance may do. A per-signal rule can narrow this, never widen\n          it — so leaving it on Observe keeps the app read-only no matter what rules exist.",
         "this_repo_is_on": "This repo is on",
-        "to_silence_one_of_these_without_turning_the_rest": "To silence one of these without turning the rest off — or to change how loudly\n            it interrupts — use Settings → Notifications, where every app channel is\n            listed. A channel appears there after it first fires.",
+        "to_silence_one_of_these_without_turning_the_rest": "To silence one of these without turning the rest off — or to change how loudly\n            it interrupts — use <0>Settings → Notifications</0>, where every app channel is\n            listed. A channel appears there after it first fires.",
         "turn_on_the_systems_you_want_watched_aws_uses_yo": "Turn on the systems you want watched. AWS uses your existing credentials — no key\n          is stored. Tokens for other providers are kept where the agent cannot read them.",
         "unavailable_here": "unavailable here",
         "when_a_state_changes": "when a state changes",
@@ -3743,7 +3743,8 @@
         "copy": "Copy",
         "copied": "Copied",
         "empty_title": "No accounts yet",
-        "empty_body": "Profiles are added under Settings → Deploy for now. Once one is set up, its account appears here.",
+        "empty_body": "Profiles are added on the Deploy page (Artifacts → Deploy). Once one is set up, its account appears here.",
+        "open_deploy": "Open the Deploy page",
         "error_title": "Couldn't load your accounts",
         "error_body": "Something went wrong reading the account list. Try again in a moment.",
         "retry": "Try again",
@@ -3761,7 +3762,7 @@
         "add_accounts_summary": "Register more of this machine's AWS profiles",
         "add_accounts_intro": "These local profiles aren't registered yet. Pick the ones you want to add.",
         "add_accounts_none": "Every local profile is already registered.",
-        "add_accounts_unsupported": "This machine can't list local AWS profiles automatically. Add profiles under Settings → Deploy instead.",
+        "add_accounts_unsupported": "This machine can't list local AWS profiles automatically. Add profiles on the Deploy page (Artifacts → Deploy) instead.",
         "add_accounts_count_one": "{{count}} of {{max}} registered",
         "add_accounts_count_other": "{{count}} of {{max}} registered",
         "add_accounts_cap_reached": "You've reached the {{max}}-profile limit. Remove one before adding more.",
@@ -4316,7 +4317,7 @@
       "loading_pane": "Loading pane…",
       "retry": "Retry",
       "the_tunnel_looks_connected_but_the_remote_dashbo": "The tunnel looks connected but the remote dashboard never loaded. It may be\n                  restarting — retry, or switch tabs above.",
-      "this_tab_stays_until_you_disconnect_the_instance": "This tab stays until you disconnect the instance in Settings → Remote Instances."
+      "this_tab_stays_until_you_disconnect_the_instance": "This tab stays until you disconnect the instance in <0>Settings → Remote Instances</0>."
     },
     "jobForm": {
       "a_short_label_for_this_job": "A short label for this job",
@@ -4926,7 +4927,7 @@
       "decline_consequence": "If you decline, nothing is loaded and your message is left as you typed it.",
       "grant_failed": "Could not record trust for this folder.",
       "title": "Trust this project's skills?",
-      "withdraw_hint": "You can withdraw this later from the Skills settings page.",
+      "withdraw_hint": "You can withdraw this later from Agent Capabilities → Skills.",
       "working": "Trusting…"
     },
     "projectSkillsTrustList": {
@@ -5056,7 +5057,7 @@
       "enable_it_under": "Enable it under",
       "not_now": "Not now",
       "open_settings": "Open settings",
-      "pick_an_installed_provider_under_settings_voice": "Pick an installed provider under Settings → Voice, or install the current one.",
+      "pick_an_installed_provider_under_settings_voice": "Pick an installed provider under <0>Settings → Voice</0>, or install the current one.",
       "provider_is_not_installed_on_this_machine": "Speech-to-text is on, but the \"{{provider}}\" provider isn't installed on this machine, so recordings can't be transcribed.",
       "settings_voice": "Settings → Voice",
       "speech_to_text_is_not_enabled_yet_so_the_microph": "Speech-to-text is not enabled yet, so the microphone cannot turn your voice into text.",
@@ -8088,7 +8089,7 @@
         "streaming": "Streaming",
         "ffmpeg_is_missing_voice_recordings_from_the_brow": "ffmpeg is missing — voice recordings from the browser cannot be transcribed until it is installed.",
         "the_bundled_audio_decoder_is_missing_or_damaged": "The bundled audio decoder is missing or damaged. Reinstall the {{productName}} desktop app; do not install FFmpeg separately.",
-        "then_restart_the_gateway_so_it_can_import_the_ne": "Then restart the gateway (Settings → About → Restart gateway) so it can import the new packages.",
+        "then_restart_the_gateway_so_it_can_import_the_ne": "Then restart the gateway so it can import the new packages.",
         "the_desktop_app_can_t_add_transcribe_support_ins": "The desktop app can't add Transcribe support — its bundled Python can't install extra packages. Install {{productName}} with pip and run the gateway from that environment instead.",
         "this_gateway_s_python_can_t_install_extra_packag": "This gateway's Python can't install extra packages, so Transcribe can't be enabled here. Run the gateway from a Python environment where pip can install boto3 + amazon-transcribe.",
         "transcribe_voice_into_the_message_box_when_you_c": "Transcribe voice into the message box when you click the mic",

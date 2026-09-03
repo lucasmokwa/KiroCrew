@@ -899,7 +899,7 @@ describe('Settings surfaces the notification channels and their on/off', () => {
   it('points at the central rail instead of duplicating per-channel mute', () => {
     // Kiro Crew stores per-channel mute centrally; a second control here would be two
     // controls that can disagree about one stored setting.
-    expect(panel).toMatch(/Settings → Notifications/)
+    expect(panel).toMatch(/<SettingsLink key="l" tab="notifications" \/>/)
   })
 
   it('describes the edge condition, not a recurring alert', () => {

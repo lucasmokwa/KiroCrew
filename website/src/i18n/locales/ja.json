@@ -2694,7 +2694,7 @@
         "view_rendered": "レンダリング済み"
       },
       "knowledge": {
-        "connectHelp": "このボールトを知識ライブラリに追加して、エージェントがノートを検索できるようにします。これは後で設定で変更できます。",
+        "connectHelp": "このボールトを知識ライブラリに追加して、エージェントがノートを検索できるようにします。これは後でエージェント機能 → 知識で変更できます。",
         "label": "{{productName}} ナレッジと同期"
       },
       "manifest": {
@@ -3417,12 +3417,12 @@
         "mcp_available": "追加可能",
         "mcp_desc": "これらは {{productName}}にインストールされている MCP サーバーです。{{name}}は追加したもののみを呼び出せます — 「追加」を押して1つを許可し、「削除」を押して取り消してください。組み込みサーバーは常に利用でき、削除できません。",
         "mcp_disabled": "無効",
-        "mcp_empty": "MCP サーバーがまだ設定されていません。{{productName}}設定 → MCP で1つを追加してから、このパネルを再度開いてください。",
-        "mcp_error_disabled": "このサーバーは無効です。{{productName}}設定 → MCP で最初に有効にしてください。",
+        "mcp_empty": "MCP サーバーがまだ設定されていません。{{productName}} のエージェント機能 → 接続で1つを追加してから、このパネルを再度開いてください。",
+        "mcp_error_disabled": "このサーバーは無効です。{{productName}} のエージェント機能 → 接続で最初に有効にしてください。",
         "mcp_error_generic": "ツールを読み込めませんでした — もう一度試してください。",
         "mcp_error_in_progress": "既にツールを発見しています — お待ちください。",
         "mcp_error_not_found": "このサーバーは設定されなくなりました。",
-        "mcp_error_probe_failed": "このサーバーは応答しませんでした。{{productName}}設定 → MCP のコマンドを確認してください。",
+        "mcp_error_probe_failed": "このサーバーは応答しませんでした。{{productName}} のエージェント機能 → 接続のコマンドを確認してください。",
         "mcp_from_cache": "(キャッシュ — 古くなっている可能性があります)",
         "mcp_loading": "サーバーを読み込み中…",
         "mcp_needs_approval": "承認が必要",
@@ -3941,7 +3941,7 @@
         "syncing": "同期中",
         "the_maximum_this_instance_may_do_a_per_signal_ru": "このインスタンスが実行できる最大。シグナルごとのルールはこれを狭くすることができ、\n          広くすることはできません — Observeに残すことで、どのルールが存在していてもアプリを読み取り専用に保ちます。",
         "this_repo_is_on": "このリポジトリは",
-        "to_silence_one_of_these_without_turning_the_rest": "これらの1つを沈黙させるには、残りをオフにすることなく — または音量を変更するには、\n            設定 → 通知を使用してください。\n            すべてのアプリチャネルがリストされています。最初にチャネルが発火した後に表示されます。",
+        "to_silence_one_of_these_without_turning_the_rest": "これらの1つを沈黙させるには、残りをオフにすることなく — または音量を変更するには、\n            <0>設定 → 通知</0>を使用してください。\n            すべてのアプリチャネルがリストされています。最初にチャネルが発火した後に表示されます。",
         "turn_on_the_systems_you_want_watched_aws_uses_yo": "監視したいシステムをオンにします。AWS は既存の認証情報を使用します。鍵は保存されません。\n          その他のプロバイダーのトークンは、エージェントが読み取ることができない場所に保管されます。",
         "unavailable_here": "ここでは利用できません",
         "when_a_state_changes": "状態が変わったとき",
@@ -4776,7 +4776,8 @@
         "copy": "コピー",
         "copied": "コピーしました",
         "empty_title": "アカウントはまだありません",
-        "empty_body": "現在、プロファイルは「設定 → Deploy」で追加します。設定が完了すると、そのアカウントがここに表示されます。",
+        "empty_body": "プロファイルはデプロイページ（アーティファクト → デプロイ）で追加します。設定が完了すると、そのアカウントがここに表示されます。",
+        "open_deploy": "デプロイページを開く",
         "error_title": "アカウントを読み込めませんでした",
         "error_body": "アカウント一覧の読み込み中に問題が発生しました。しばらくしてからもう一度お試しください。",
         "retry": "再試行",
@@ -4790,7 +4791,7 @@
         "add_accounts_summary": "このマシンの AWS プロファイルをさらに登録する",
         "add_accounts_intro": "これらのローカルプロファイルはまだ登録されていません。追加したいものを選んでください。",
         "add_accounts_none": "ローカルプロファイルはすべて登録済みです。",
-        "add_accounts_unsupported": "このマシンではローカルの AWS プロファイルを自動的に一覧表示できません。代わりに 設定 -> Deploy からプロファイルを追加してください。",
+        "add_accounts_unsupported": "このマシンではローカルの AWS プロファイルを自動的に一覧表示できません。代わりにデプロイページ（アーティファクト → デプロイ）からプロファイルを追加してください。",
         "add_accounts_count_other": "{{max}} 件のうち {{count}} 件を登録済み",
         "add_accounts_cap_reached": "プロファイルの上限 {{max}} 件に達しました。追加するには、まず 1 件を削除してください。",
         "add_accounts_register": "選択したものを登録",
@@ -5849,7 +5850,7 @@
       "pane_failed_to_load": "ペインの読み込みに失敗",
       "retry": "再試行",
       "the_tunnel_looks_connected_but_the_remote_dashbo": "トンネルは接続されているように見えますが、リモートダッシュボードは読み込まれません。再起動している可能性があります。\n                  再試行するか、上部のタブを切り替えてください。",
-      "this_tab_stays_until_you_disconnect_the_instance": "このタブは、設定 → リモートインスタンスでインスタンスを切断するまで表示されたままです。"
+      "this_tab_stays_until_you_disconnect_the_instance": "このタブは、<0>設定 → リモートインスタンス</0>でインスタンスを切断するまで表示されたままです。"
     },
     "issuePanel": {
       "add_to_chat": "チャットに追加",
@@ -6934,7 +6935,7 @@
       "decline_consequence": "拒否した場合、何も読み込まれず、メッセージは入力したままになります。",
       "grant_failed": "このフォルダーの信頼を記録できませんでした。",
       "title": "このプロジェクトのスキルを信頼しますか？",
-      "withdraw_hint": "これは後でスキル設定ページから取り消せます。",
+      "withdraw_hint": "これは後でエージェント機能 → スキルから取り消せます。",
       "working": "信頼中…"
     },
     "projectSkillsTrustList": {
@@ -7208,7 +7209,7 @@
       "enable_it_under": "以下から有効にする",
       "not_now": "後で",
       "open_settings": "設定を開く",
-      "pick_an_installed_provider_under_settings_voice": "設定 → 音声から、インストール済みのプロバイダを選択するか、現在のプロバイダをインストールしてください。",
+      "pick_an_installed_provider_under_settings_voice": "<0>設定 → 音声</0>から、インストール済みのプロバイダを選択するか、現在のプロバイダをインストールしてください。",
       "provider_is_not_installed_on_this_machine": "音声テキスト変換はオンですが、「{{provider}}」プロバイダはこのマシンにインストールされていないため、録音をテキストに変換できません。",
       "settings_voice": "設定 → 音声",
       "speech_to_text_is_not_enabled_yet_so_the_microph": "音声テキスト変換はまだ有効になっていないため、マイクは音声をテキストに変換できません。",
@@ -12607,7 +12608,7 @@
         "system_default": "システムのデフォルト",
         "ffmpeg_is_missing_voice_recordings_from_the_brow": "ffmpeg が見つかりません — インストールされるまで、ブラウザーからの音声録音は文字起こしできません。",
         "the_bundled_audio_decoder_is_missing_or_damaged": "内蔵オーディオデコーダーが見つからないか、破損しています。{{productName}} デスクトップアプリを再インストールしてください。FFmpeg を別途インストールする必要はありません。",
-        "then_restart_the_gateway_so_it_can_import_the_ne": "その後、新しいパッケージを読み込めるよう、ゲートウェイを再起動してください（設定 → 情報 → ゲートウェイを再起動）。",
+        "then_restart_the_gateway_so_it_can_import_the_ne": "その後、新しいパッケージを読み込めるよう、ゲートウェイを再起動してください。",
         "the_desktop_app_can_t_add_transcribe_support_ins": "デスクトップアプリでは Transcribe サポートを追加できません。同梱の Python は追加パッケージをインストールできないためです。代わりに pip で {{productName}} をインストールし、その環境からゲートウェイを起動してください。",
         "this_gateway_s_python_can_t_install_extra_packag": "このゲートウェイの Python は追加パッケージをインストールできないため、ここでは Transcribe を有効にできません。pip で boto3 + amazon-transcribe をインストールできる Python 環境でゲートウェイを実行してください。",
         "transcribe_voice_into_the_message_box_when_you_c": "マイクをクリックすると音声をメッセージボックスに文字起こし",

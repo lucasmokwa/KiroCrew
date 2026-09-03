@@ -57,7 +57,9 @@ import {
   ShieldAlert,
 } from 'lucide-react'
 import { Badge, Btn, Card, CardTitle, Input, SendBtn, Toggle } from '../../components/ui'
+import { Trans } from 'react-i18next'
 import { i18nT } from '../../i18n/t'
+import { SettingsLink } from '../../components/SettingsLink'
 import { fmtUnit } from '../../i18n/format'
 import SegmentedControl from '../../components/SegmentedControl'
 import SimpleSelect from '../../components/SimpleSelect'
@@ -567,7 +569,10 @@ function NotifyOutCard({
         <p className="text-[12px] text-muted mt-1 flex items-start gap-1.5">
           <Info className="lucide-inline" />
           <span>
-            {i18nT('apps.opsMissionControl.settingsPanel.to_silence_one_of_these_without_turning_the_rest')}
+            <Trans
+              i18nKey="apps.opsMissionControl.settingsPanel.to_silence_one_of_these_without_turning_the_rest"
+              components={[<SettingsLink key="l" tab="notifications" />]}
+            />
           </span>
         </p>
       ) : null}

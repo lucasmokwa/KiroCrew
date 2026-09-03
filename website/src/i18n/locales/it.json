@@ -2755,7 +2755,7 @@
         "view_rendered": "Renderizzato"
       },
       "knowledge": {
-        "connectHelp": "Aggiunge questo vault alla libreria Conoscenza così gli agenti possono cercare nelle tue note. Modificabile poi nelle Impostazioni.",
+        "connectHelp": "Aggiunge questo vault alla libreria Conoscenza così gli agenti possono cercare nelle tue note. Modificabile poi in Capacità dell'agente → Conoscenze.",
         "label": "Sincronizza con la conoscenza di {{productName}}"
       },
       "manifest": {
@@ -3486,12 +3486,12 @@
         "mcp_available": "Disponibili da aggiungere",
         "mcp_desc": "Questi sono i server MCP installati in {{productName}}. {{name}} può chiamare solo quelli aggiunti qui — premi Aggiungi per concederne uno, Rimuovi per revocarlo. I server integrati sono sempre disponibili e non possono essere rimossi.",
         "mcp_disabled": "Disattivato",
-        "mcp_empty": "Nessun server MCP è ancora configurato. Aggiungine uno in Impostazioni di {{productName}} → MCP, poi riapri questo pannello.",
-        "mcp_error_disabled": "Questo server è disabilitato. Abilitalo prima in Impostazioni {{productName}} → MCP.",
+        "mcp_empty": "Nessun server MCP è ancora configurato. Aggiungine uno in Capacità dell'agente di {{productName}} → Connessioni, poi riapri questo pannello.",
+        "mcp_error_disabled": "Questo server è disabilitato. Abilitalo prima in Capacità dell'agente di {{productName}} → Connessioni.",
         "mcp_error_generic": "Impossibile caricare gli strumenti: riprova.",
         "mcp_error_in_progress": "Rilevamento degli strumenti già in corso: attendi.",
         "mcp_error_not_found": "Questo server non è più configurato.",
-        "mcp_error_probe_failed": "Questo server non ha risposto. Controlla il suo comando in Impostazioni {{productName}} → MCP.",
+        "mcp_error_probe_failed": "Questo server non ha risposto. Controlla il suo comando in Capacità dell'agente di {{productName}} → Connessioni.",
         "mcp_from_cache": "(in cache — potrebbe essere obsoleto)",
         "mcp_loading": "Caricamento dei server…",
         "mcp_needs_approval": "Richiede approvazione",
@@ -4020,7 +4020,7 @@
         "syncing": "syncing",
         "the_maximum_this_instance_may_do_a_per_signal_ru": "The maximum this instance may do. A per-signal rule can narrow this, never widen\n          it — so leaving it on Observe keeps the app read-only no matter what rules exist.",
         "this_repo_is_on": "This repo is on",
-        "to_silence_one_of_these_without_turning_the_rest": "To silence one of these without turning the rest off — or to change how loudly\n            it interrupts — use Settings → Notifications, where every app channel is\n            listed. A channel appears there after it first fires.",
+        "to_silence_one_of_these_without_turning_the_rest": "Per silenziare uno di questi senza disattivare gli altri — o per cambiare quanto\n            interrompe — usa <0>Impostazioni → Notifiche</0>, dove è elencato ogni canale\n            dell’app. Un canale compare lì dopo il primo invio.",
         "turn_on_the_systems_you_want_watched_aws_uses_yo": "Turn on the systems you want watched. AWS uses your existing credentials — no key\n          is stored. Tokens for other providers are kept where the agent cannot read them.",
         "unavailable_here": "unavailable here",
         "when_a_state_changes": "when a state changes",
@@ -4936,7 +4936,8 @@
         "copy": "Copia",
         "copied": "Copiato",
         "empty_title": "Ancora nessun account",
-        "empty_body": "Per ora i profili si aggiungono in Impostazioni → Deploy. Una volta configurato un profilo, il suo account comparirà qui.",
+        "empty_body": "I profili si aggiungono nella pagina Deploy (Artefatti → Deploy). Una volta configurato un profilo, il suo account comparirà qui.",
+        "open_deploy": "Apri la pagina Deploy",
         "error_title": "Impossibile caricare i tuoi account",
         "error_body": "Qualcosa è andato storto durante la lettura dell'elenco degli account. Riprova tra un momento.",
         "retry": "Riprova",
@@ -4954,7 +4955,7 @@
         "add_accounts_summary": "Registra altri profili AWS di questa macchina",
         "add_accounts_intro": "Questi profili locali non sono ancora registrati. Scegli quelli che vuoi aggiungere.",
         "add_accounts_none": "Tutti i profili locali sono già registrati.",
-        "add_accounts_unsupported": "Questa macchina non può elencare automaticamente i profili AWS locali. Aggiungi i profili da Impostazioni -> Deploy.",
+        "add_accounts_unsupported": "Questa macchina non può elencare automaticamente i profili AWS locali. Aggiungi i profili nella pagina Deploy (Artefatti → Deploy).",
         "add_accounts_count_one": "{{count}} su {{max}} registrato",
         "add_accounts_count_other": "{{count}} su {{max}} registrati",
         "add_accounts_cap_reached": "Hai raggiunto il limite di {{max}} profili. Rimuovine uno prima di aggiungerne altri.",
@@ -6045,7 +6046,7 @@
       "pane_failed_to_load": "Caricamento del pannello non riuscito",
       "retry": "Riprova",
       "the_tunnel_looks_connected_but_the_remote_dashbo": "Il tunnel sembra connesso ma la dashboard remota non si è mai caricata. Potrebbe essere\n                  in fase di riavvio — riprova oppure cambia scheda qui sopra.",
-      "this_tab_stays_until_you_disconnect_the_instance": "Questa scheda resta finché non disconnetti l'istanza in Impostazioni → Istanze remote."
+      "this_tab_stays_until_you_disconnect_the_instance": "Questa scheda resta finché non disconnetti l'istanza in <0>Impostazioni → Istanze remote</0>."
     },
     "issuePanel": {
       "add_to_chat": "Aggiungi alla chat",
@@ -7144,7 +7145,7 @@
       "decline_consequence": "Se rifiuti, non viene caricato nulla e il tuo messaggio resta come l’hai scritto.",
       "grant_failed": "Non è stato possibile registrare l’attendibilità di questa cartella.",
       "title": "Considerare attendibili le skill di questo progetto?",
-      "withdraw_hint": "Puoi revocarla più tardi dalla pagina delle impostazioni Skill.",
+      "withdraw_hint": "Puoi revocarla più tardi da Capacità dell'agente → Skill.",
       "working": "Impostazione dell’attendibilità…"
     },
     "projectSkillsTrustList": {
@@ -7418,7 +7419,7 @@
       "enable_it_under": "Attivalo in",
       "not_now": "Non ora",
       "open_settings": "Apri le impostazioni",
-      "pick_an_installed_provider_under_settings_voice": "Scegli un provider installato in Impostazioni → Voce, oppure installa quello attuale.",
+      "pick_an_installed_provider_under_settings_voice": "Scegli un provider installato in <0>Impostazioni → Voce</0>, oppure installa quello attuale.",
       "provider_is_not_installed_on_this_machine": "Il riconoscimento vocale è attivo, ma il provider «{{provider}}» non è installato su questo computer, quindi le registrazioni non possono essere trascritte.",
       "settings_voice": "Impostazioni → Voce",
       "speech_to_text_is_not_enabled_yet_so_the_microph": "La funzione da voce a testo non è ancora attiva, quindi il microfono non può trasformare la tua voce in testo.",
@@ -12943,7 +12944,7 @@
         "system_default": "Predefinito di sistema",
         "ffmpeg_is_missing_voice_recordings_from_the_brow": "ffmpeg è mancante — le registrazioni vocali dal browser non possono essere trascritte finché non viene installato.",
         "the_bundled_audio_decoder_is_missing_or_damaged": "Il decoder audio incluso è mancante o danneggiato. Reinstalla l’app desktop {{productName}}; non installare FFmpeg separatamente.",
-        "then_restart_the_gateway_so_it_can_import_the_ne": "Poi riavvia il gateway (Impostazioni → Informazioni → Riavvia gateway) in modo che possa importare i nuovi pacchetti.",
+        "then_restart_the_gateway_so_it_can_import_the_ne": "Poi riavvia il gateway in modo che possa importare i nuovi pacchetti.",
         "the_desktop_app_can_t_add_transcribe_support_ins": "L’app desktop non può aggiungere il supporto per Transcribe: il suo Python integrato non può installare pacchetti aggiuntivi. Installa {{productName}} con pip ed esegui il gateway da quell’ambiente.",
         "this_gateway_s_python_can_t_install_extra_packag": "Il Python di questo gateway non può installare pacchetti aggiuntivi, quindi Transcribe non può essere abilitato qui. Esegui il gateway da un ambiente Python in cui pip possa installare boto3 + amazon-transcribe.",
         "transcribe_voice_into_the_message_box_when_you_c": "Trascrivi la voce nella casella del messaggio quando clicchi sul microfono",

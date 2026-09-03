@@ -1,6 +1,11 @@
+import type { ReactElement } from 'react'
 import { describe, it, expect, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render as rtlRender, screen } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import VoiceDisabledModal from '../components/VoiceDisabledModal'
+
+// The modal renders an inline <SettingsLink>, which needs a Router.
+const render = (ui: ReactElement) => rtlRender(<MemoryRouter>{ui}</MemoryRouter>)
 
 /**
  * Covers the two voice-unavailable causes the modal must distinguish.
