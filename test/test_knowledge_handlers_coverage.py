@@ -1655,8 +1655,8 @@ class TestStartWatcherAsync:
         started = asyncio.Event()
 
         class _FakeWatcher:
-            def __init__(self, *, store, pipeline, project_dirs):
-                self.project_dirs = project_dirs
+            def __init__(self, *, store, pipeline):
+                self.store = store
 
             async def start(self):
                 started.set()
@@ -1665,7 +1665,6 @@ class TestStartWatcherAsync:
                 return None
 
         monkeypatch.setattr(f"{MODULE}.KnowledgeWatcher", _FakeWatcher)
-        monkeypatch.setattr(f"{MODULE}._slot_project_snapshot", lambda _s: ["/proj"])
 
         app = _make_app(store, pipeline=MagicMock(), watcher=old)
         await kh._start_watcher_async(app)
@@ -1673,8 +1672,10 @@ class TestStartWatcherAsync:
             await asyncio.wait_for(started.wait(), timeout=5)
             old.stop.assert_awaited_once()
             assert isinstance(app["knowledge_watcher"], _FakeWatcher)
-            # The dirs callback reads live chat-slot projects, not recents.
-            assert app["knowledge_watcher"].project_dirs() == ["/proj"]
+            # The watcher is constructed with the store and pipeline only: it no
+            # longer receives a project-dirs callback, because nothing registers a
+            # project directory on its own.
+            assert app["knowledge_watcher"].store is store
         finally:
             task = app["_knowledge_watcher_task"]
             task.cancel()

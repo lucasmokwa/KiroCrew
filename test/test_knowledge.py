@@ -1132,17 +1132,18 @@ class TestKnowledgeStoreExtended:
             "SELECT sync_status FROM sources WHERE id = ?", (sid,)).fetchone()
         assert row["sync_status"] == "paused"
 
-    def test_auto_source_persists_sync_status_column(self, store):
-        """The auto-source insert path keeps the same single-store invariant.
+    def test_auto_added_source_persists_sync_status_column(self, store):
+        """An auto-added source keeps the same single-store invariant.
 
-        Drop-folder and project-docs auto sources seed sync_status='active' in
-        properties; the column must carry it or the dashboard renders the stale
-        'pending' control for a source the watcher is actively scanning.
+        The aggregate source the agent's add-document tool creates seeds
+        sync_status='active' in properties; the column must carry it or the
+        dashboard renders the stale 'pending' control for a source that is
+        already active.
         """
-        sid, created = store.create_auto_source_unless_dismissed(
-            "drop", "local_folder", "/tmp/auto-drop",
-            {"sync_status": "active", "auto_added": True})
-        assert created and sid is not None
+        sid = store.add_source(
+            "agent-added", "agent", "agent://",
+            properties={"sync_status": "active", "auto_added": True})
+        assert sid is not None
         row = store.db.execute(
             "SELECT sync_status, properties FROM sources WHERE id = ?", (sid,)).fetchone()
         assert row["sync_status"] == "active"

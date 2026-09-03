@@ -319,8 +319,8 @@ class FolderWatcher:
 
         ``chunk_budget`` stops the scan once that many chunks have been ingested
         in THIS sweep, leaving the rest for later sweeps. ``None`` is unbounded.
-        Callers resolve the value: :func:`folder_chunk_budget` for a hand-added
-        folder, ``knowledge.auto_ingest_chunk_budget`` for an auto-registered one.
+        Callers resolve the value with :func:`folder_chunk_budget`, capped by the
+        watcher's global ``knowledge.sweep_chunk_budget``.
         """
         source_id = source["id"]
         if source_id not in self._locks:

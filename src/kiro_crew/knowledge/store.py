@@ -22,6 +22,13 @@ from .._sqlite_compat import fts5_cjk_match_groups, fts5_segment_for_index
 
 logger = logging.getLogger(__name__)
 
+# Marker in a source row's properties for a source Kiro Crew created itself
+# rather than the user registering it by hand -- today only the aggregate row
+# the agent's "add document" tool writes into. Read by the ingestion pipeline
+# (redaction) and by the delete handler (tombstone). Lived in the removed
+# autosource module until the folder auto-registration paths were deleted.
+AUTO_ADDED_PROP = "auto_added"
+
 # Every query in this module funnels through the ``db`` property, so one check
 # there covers every caller at any stack depth -- including the ones a lexical
 # ``async def`` scan cannot see, which is why this guard exists (#7078, the
@@ -1141,60 +1148,6 @@ class KnowledgeStore:
         """Total number of registered sources (all types)."""
         row = self.db.execute("SELECT COUNT(*) AS cnt FROM sources").fetchone()
         return int(row["cnt"]) if row else 0
-
-    def create_auto_source_unless_dismissed(
-        self, name: str, source_type: str, uri: str, properties: dict,
-        *, max_sources: int = 0,
-    ) -> tuple[str | None, bool]:
-        """Atomically: reuse, refuse-if-dismissed, or insert an auto source.
-
-        Returns ``(source_id, created)``, or ``(None, False)`` when ``uri`` is
-        tombstoned or the ``max_sources`` cap is reached. The tombstone check,
-        the existing-row check, the cap check and the INSERT all happen inside
-        ONE ``BEGIN IMMEDIATE`` transaction so a concurrent
-        ``delete_source_cascade(..., dismiss_uri=uri)`` cannot interleave: either
-        the delete's tombstone is visible here and nothing is created, or this
-        insert lands first and the delete then removes it and tombstones the URI.
-        Doing the check and the insert as two transactions would leave exactly
-        the window that lets a deleted auto source come back.
-        """
-        self.db.execute("BEGIN IMMEDIATE")
-        try:
-            dismissed = self.db.execute(
-                "SELECT 1 FROM dismissed_auto_sources WHERE uri = ?", (uri,)
-            ).fetchone()
-            if dismissed:
-                self.db.execute("COMMIT")
-                return None, False
-            existing = self.db.execute(
-                "SELECT id FROM sources WHERE uri = ?", (uri,)
-            ).fetchone()
-            if existing:
-                sid = existing["id"]
-                self.db.execute("COMMIT")
-                return sid, False
-            # Enforce max_sources cap (0 = unbounded).
-            if max_sources > 0:
-                count = self.db.execute(
-                    "SELECT COUNT(*) AS cnt FROM sources"
-                ).fetchone()
-                if count and int(count["cnt"]) >= max_sources:
-                    self.db.execute("COMMIT")
-                    return None, False
-            sid = str(uuid4())
-            now = datetime.now().isoformat()
-            stored = _without_sync_status(properties)
-            self.db.execute(
-                "INSERT INTO sources (id, name, source_type, uri, properties, sync_status, "
-                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (sid, name, source_type, uri, json.dumps(stored),
-                 self._initial_sync_status(properties), now, now),
-            )
-            self.db.execute("COMMIT")
-            return sid, True
-        except Exception:
-            self.db.execute("ROLLBACK")
-            raise
 
     def surviving_group_in_txn(self, table: str, source_id: str, key: str) -> list[str]:
         """Items a doc-state row already names and this source still owns.

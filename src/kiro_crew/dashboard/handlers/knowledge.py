@@ -24,13 +24,11 @@ from kiro_crew.dashboard.handlers._shared import read_bounded_json
 from kiro_crew.dashboard.handlers.files import (
     _ZIP_CONTAINER_EXTS,
     _content_matches_ext,
-    _slot_project_snapshot,
 )
 from kiro_crew.executors import run_in_embed_pool
 from kiro_crew.knowledge.agent_fetch import fetch_url_content
 from kiro_crew.knowledge.agent_source import add_agent_document
 from kiro_crew.knowledge.artifact_ingest import ArtifactKnowledgeSync
-from kiro_crew.knowledge.autosource import AUTO_ADDED_PROP
 from kiro_crew.knowledge.chunker import HeadingAwareChunker
 from kiro_crew.knowledge.connectors.base import BaseConnector
 from kiro_crew.knowledge.connectors.local_folder import LocalFolderConnector
@@ -56,7 +54,7 @@ from kiro_crew.knowledge.llm_pool import DEFAULT_EXTRACTION_EFFORT, LLMPool
 from kiro_crew.knowledge.readers import FileReader
 from kiro_crew.knowledge.retrieval import HybridRetriever
 from kiro_crew.knowledge.spend import source_spend
-from kiro_crew.knowledge.store import KnowledgeBundleError
+from kiro_crew.knowledge.store import AUTO_ADDED_PROP, KnowledgeBundleError
 from kiro_crew.knowledge.sync import SyncScheduler
 from kiro_crew.knowledge.watcher import KnowledgeWatcher
 from kiro_crew.security import is_sensitive_path
@@ -188,21 +186,8 @@ async def _start_watcher_async(app: web.Application) -> None:
         await old_watcher.stop()
     pipeline = app["knowledge_pipeline"]
     store = app["state"].knowledge_store
-    state = app["state"]
 
-    def _project_dirs() -> list[str]:
-        """Directories the user is currently working in.
-
-        Live chat-slot project dirs only -- deliberately NOT the recent-projects
-        list, which includes directories the user merely picked once. Registering
-        those would spend LLM extraction on trees they are not working in.
-
-        Called by the watcher ON the event loop, because it copies a dict that
-        other coroutines on the loop mutate; it does no I/O.
-        """
-        return _slot_project_snapshot(state)
-
-    watcher = KnowledgeWatcher(store=store, pipeline=pipeline, project_dirs=_project_dirs)
+    watcher = KnowledgeWatcher(store=store, pipeline=pipeline)
     app["knowledge_watcher"] = watcher
     task = asyncio.create_task(watcher.start())
     app["_knowledge_watcher_task"] = task
