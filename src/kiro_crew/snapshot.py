@@ -21,6 +21,12 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Any, Callable
 
 from kiro_crew import pinned_fs, platform_compat
+from kiro_crew.jsonl_util import (
+    RECORD_CAP,
+    UndecodableRecord,
+    UnreadableRecord,
+    strict_raw_records,
+)
 
 if TYPE_CHECKING:
     from kiro_crew import snapshot_redact
@@ -2370,25 +2376,235 @@ def _merge_crons(src_path: Path, dst_path: Path) -> None:
     print(f"  Cron jobs imported: {imported} (skipped {total - imported} duplicates)")
 
 
+_TERMINATORS = (b"\n", b"\r")
+
+# Longest single notification record either side of the merge will materialise.
+# Both trees are agent-writable and the read feeds an append to a durable file,
+# so an over-cap record aborts rather than being skipped. Named here, and read at
+# call time, so a test can move the dial instead of writing a 128 MiB fixture --
+# the same reason `subagent_cost` names its own.
+_NOTIFICATION_RECORD_CAP = RECORD_CAP
+
+
+def _notification_key(record: bytes, path: Path) -> tuple[Any, ...] | None:
+    """The dedupe key for one raw notification record, or ``None`` if it has none.
+
+    Well-defined and hashable for EVERY record shape, which the previous
+    ``json.loads(line).get("ts") or line.strip()`` was not: a non-object
+    record raised ``AttributeError`` off ``.get``, and a list or dict ``ts``
+    raised ``TypeError`` on set insert. Both escaped as an aborted restore.
+
+    A ``ts`` is used whenever it is truthy AND hashable, which is every JSON
+    scalar. Restricting it to ``str`` would have been a REGRESSION: the
+    predecessor keyed a numeric ``ts`` on the number, so two rows carrying the
+    same numeric ``ts`` with different bytes -- one normalised, one not --
+    deduplicated, and keying them on their raw form instead persists a
+    duplicate. Only an unhashable ``ts``, which cannot be a set member at all,
+    falls through to the raw form.
+
+    The ``ts`` goes into the key under a KIND TAG that is deliberately coarser
+    than its Python type, because two different equalities are in play at once
+    and a naive tag gets one of them wrong:
+
+    * ``True == 1`` and ``hash(True) == hash(1)``, so an untagged key makes a row
+      with ``ts: true`` and a row with ``ts: 1`` one set member and DELETES the
+      second as a duplicate.
+    * ``1 == 1.0`` and they hash equal too, so tagging with
+      ``type(ts).__name__`` splits a row written as an integer here and a float
+      there -- an ordinary serializer artefact -- into two records and PERSISTS a
+      duplicate.
+
+    An earlier revision hit each of those in turn. One tag covers both: integers
+    and floats share ``"num"`` so they still deduplicate exactly as the
+    predecessor's bare-value key did, while ``bool`` is its own tag. ``bool`` is
+    tested first because it is a SUBCLASS of ``int``, so an ``isinstance(ts,
+    int)`` check would swallow it.
+
+    A record with no usable ``ts`` returns ``None`` and is therefore NEVER
+    deduplicated. The predecessor fell back to ``line.strip()``, and that is
+    CONTENT used as identity, which for a row that does not parse is not identity
+    at all: two different records whose stripped bytes coincide collapse, and the
+    loser is deleted.
+
+    That is reachable, not theoretical. A crash mid-append leaves a truncated row
+    in the live file. A source record holding a bare carriage return is split at
+    it, because this reader's boundaries are the universal-newline set. The
+    source's first piece can strip to exactly that truncated live row -- so it is
+    skipped as a duplicate while the second piece is appended, and the live file
+    gains a line that parses as neither while the source's own bytes are gone.
+    Measured on real bytes before this was changed. The posture the whole change
+    rests on -- a skipped record is a permanently deleted one -- forbids it, so
+    identity is now required before anything may be skipped.
+
+    The cost is declared rather than hidden: re-running a merge appends a
+    ``ts``-less row again, where the predecessor would have deduplicated it.
+    Duplicating a row is recoverable; deleting one is not. ``_merge_notifications``
+    validates the whole source before appending anything so that a FAILED merge
+    does not leave a prefix for a retry to duplicate.
+
+    Because ``None`` is the only other return, the key needs no constant element
+    naming it a ``ts`` key -- there is nothing to tell it apart from. ``(kind,
+    ts)`` is the whole key.
+
+    Raises :class:`UndecodableRecord` for a record that is not valid UTF-8,
+    which is how the encoding property is enforced: this decode VALIDATES and
+    the result is used only for the key, while what gets appended is always the
+    original bytes. Validating by decoding and then writing the decoded form
+    back is what makes the copy non-byte-exact in the first place.
+    """
+    try:
+        text = record.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise UndecodableRecord(f"record is not valid UTF-8 in {path!r}") from exc
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return None
+    ts = parsed.get("ts") if isinstance(parsed, dict) else None
+    # Truthiness reproduces the predecessor's `or` fallback: an absent, empty or
+    # zero ts fell through to the line itself, and now falls through to None.
+    if ts:
+        try:
+            hash(ts)
+        except TypeError:
+            pass
+        else:
+            # `bool` first: it is a subclass of `int`, so the numeric arm would
+            # otherwise swallow it and re-create the True/1 collision.
+            if isinstance(ts, bool):
+                kind = "bool"
+            elif isinstance(ts, (int, float)):
+                kind = "num"
+            else:
+                kind = type(ts).__name__
+            return (kind, ts)
+    return None
+
+
 def _merge_notifications(src_path: Path, dst_path: Path) -> None:
-    existing: set[str] = set()
-    with open(dst_path) as f:
-        for line in f:
-            try:
-                existing.add(json.loads(line).get("ts") or line.strip())
-            except (ValueError, TypeError):
-                pass
-    imported = 0
-    with open(dst_path, "a") as out, open(src_path) as f:
-        for line in f:
-            try:
-                key = json.loads(line).get("ts") or line.strip()
-                if key not in existing:
-                    out.write(line)
+    """Append the snapshot's notification records to the live file, byte for byte.
+
+    This is the only merge that COPIES records rather than consuming them, so
+    reading faithfully is not the whole contract -- the bytes must also be valid
+    for the destination. Both handles are BINARY and framing comes from
+    :func:`strict_raw_records`, because the text-mode predecessor was a locale
+    decode followed by a locale encode and neither half was byte-exact:
+
+    * Universal-newline translation on read, ``os.linesep`` on write. A record
+      terminated ``\\r\\n`` was appended as ``\\n`` -- a byte silently dropped --
+      and a bare ``\\r`` INSIDE a record split it in two, so both halves failed
+      ``json.loads``, the ``except`` swallowed both, and the record was lost
+      while the function printed success. Both fire on a pure UTF-8 host with
+      fully valid UTF-8 input, so an explicit ``encoding=`` does not address
+      them; ``newline=`` is a separate axis and binary mode closes both at once.
+    * The locale codec decided whether an invalid-UTF-8 record aborted the
+      restore or was delivered into the live file. ``for line in f`` decodes
+      OUTSIDE the ``try``, so ``UnicodeDecodeError`` -- a ``ValueError`` --
+      escaped the ``except (ValueError, TypeError)`` because the iterator raised
+      it, not ``json.loads``. On a UTF-8 host that aborted the restore with a
+      traceback; under a single-byte locale the decode succeeded, the encode put
+      the same bytes back, and the live file stopped being valid UTF-8 -- after
+      which its loader returns NO rows for the whole file and the next rewrite
+      persists that empty view.
+
+    The posture is ABORT, never skip, because the output feeds a durable write
+    and a skipped record is a deleted one. Abort means RAISE, not warn: this
+    function's callers report an outcome to somebody. ``apply_import_zip``
+    appends ``notifications (merged)`` to its summary and the dashboard handler
+    answers ``ok: True`` with a SEL ``outcome="ok"``, and a printed warning is
+    invisible to both -- so warn-and-return would tell an API caller the import
+    succeeded while records were left behind. The print stays so a CLI operator
+    reads the reason before the traceback. This is why it differs from
+    ``_merge_crons``, which warns and returns: a refused cron merge writes
+    nothing and skips one component, while this one may already have appended a
+    prefix, and the caller has to learn the write is incomplete.
+
+    * A destination-scan failure is still a true no-op -- the destination is not
+      even opened for append until that scan has completed.
+    * The SOURCE is validated whole before the destination is opened for append,
+      so a source-side refusal is also a no-op. Without that pass, a source whose
+      Nth record is undecodable had already appended N-1 records when it aborted,
+      and a retry re-appended every identity-less one of them, since a row with
+      no ``ts`` cannot be deduplicated. The cost is reading the source twice.
+    * A failure DURING the copy is therefore the residual case -- the source
+      changed between the two passes -- and its prefix stays. Rolling it back
+      would be a second unvalidated write to the live file.
+
+    Every appended record ends with a terminator, and an unterminated final
+    record already in the destination gains one before anything is appended
+    after it. Without that, two records glued into one line that parses as
+    neither.
+    """
+    existing: set[tuple[Any, ...]] = set()
+    dst_unterminated = False
+    try:
+        with open(dst_path, "rb") as f:
+            for record in strict_raw_records(f, dst_path, cap=_NOTIFICATION_RECORD_CAP):
+                key = _notification_key(record, dst_path)
+                if key is not None:
                     existing.add(key)
-                    imported += 1
-            except (ValueError, TypeError):
-                pass
+                dst_unterminated = not record.endswith(_TERMINATORS)
+    except (OSError, UnreadableRecord) as exc:
+        # No `_safe_name` here, deliberately: this path is the LIVE data home,
+        # chosen by the operator, not a name that came out of an archive -- which
+        # is the scope `_safe_name`'s own docstring states. The SOURCE prints do
+        # wrap it; see the one below.
+        print(f"  ⚠️  Could not read {dst_path}: {exc} — merge aborted")
+        raise
+    # The ENTIRE source is validated before the destination is opened for append.
+    # Without this pass, a source whose Nth record is undecodable or over-cap has
+    # already appended N-1 records by the time it aborts -- and a retry
+    # re-appends every identity-less one of those, because a row with no ``ts``
+    # cannot be deduplicated by construction. Validating first makes the source
+    # side all-or-nothing in the ordinary case, so there is no prefix to
+    # duplicate.
+    try:
+        with open(src_path, "rb") as f:
+            for record in strict_raw_records(f, src_path, cap=_NOTIFICATION_RECORD_CAP):
+                _notification_key(record, src_path)
+    except (OSError, UnreadableRecord) as exc:
+        # The PATH goes through `_safe_name` because a bundle chooses its own inner
+        # root, so an archive-derived path can carry ANSI controls -- and printing
+        # one raw lets a hostile archive move the cursor and overwrite lines right
+        # above the prompt where the operator decides whether to trust the restore.
+        #
+        # The EXCEPTION deliberately does NOT, and the invariant is worth stating
+        # because it is what makes the wrapper unnecessary rather than forgotten:
+        # both types this arm catches already render an embedded path with
+        # repr-style escaping -- `OSError.__str__` does it for its filename, and
+        # `jsonl_util` uses `{path!r}` for the reason its own comment gives.
+        # Measured: a control character in a directory name reaches neither
+        # exception's `str()` raw. Widening this `except` tuple means re-checking
+        # that, because a type formatting a path with `str()` would need the wrapper.
+        print(f"  ⚠️  Could not read {_safe_name(src_path)}: {exc} — merge aborted")
+        raise
+    imported = 0
+    try:
+        with open(dst_path, "ab") as out, open(src_path, "rb") as f:
+            if dst_unterminated:
+                out.write(b"\n")
+            for record in strict_raw_records(f, src_path, cap=_NOTIFICATION_RECORD_CAP):
+                key = _notification_key(record, src_path)
+                # A `None` key means the record carries no identity, so there is
+                # nothing it could be a duplicate OF. Both `existing.add` sites
+                # refuse `None`, which is what keeps it out of this membership
+                # test -- an unconditional `key is not None` here would be dead,
+                # and a mutation proved it unobservable. Skipping such a record on
+                # its CONTENT instead is what deleted bytes; see
+                # _notification_key.
+                if key in existing:
+                    continue
+                out.write(record if record.endswith(_TERMINATORS) else record + b"\n")
+                if key is not None:
+                    existing.add(key)
+                imported += 1
+    except (OSError, UnreadableRecord) as exc:
+        # Reached only when the source changed BETWEEN the validation pass and
+        # this one, so the prefix already appended stays: rolling it back would
+        # be a second unvalidated write. Names the count so an operator knows a
+        # prefix landed, and identity-less rows in it will re-append on a retry.
+        print(f"  ⚠️  Stopped merging {_safe_name(src_path)} after {imported} record(s): {exc}")
+        raise
     print(f"  Notifications imported: {imported}")
 
 
