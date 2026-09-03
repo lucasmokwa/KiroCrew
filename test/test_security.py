@@ -2389,19 +2389,45 @@ class TestOAuthAuthorizationUrlRedaction:
         assert oauth_url_contains_credential(url) is True
         self._assert_general_redactors_remove_secret(url, encoded)
 
+    def test_bare_aws_secret_inside_state_fails_closed_everywhere(self) -> None:
+        assert len(self.BARE_AWS_SECRET) == 40
+        # A base64-standard-alphabet run is a shape base64url cannot emit, so it
+        # never inherits the entropy exemption -- no `+`/`/` reaches the blanked
+        # set at an approved endpoint.
+        assert "/" in self.BARE_AWS_SECRET
+        url = self.NOTION_URL.replace(self.STATE, self.BARE_AWS_SECRET, 1)
+        assert oauth_url_contains_credential(url) is True
+        self._assert_general_redactors_remove_secret(url, self.BARE_AWS_SECRET)
+
+    def test_percent_encoded_secret_alphabet_cannot_buy_the_exemption(self) -> None:
+        # The markerless scan runs on the raw and decoded URL, so the shape test
+        # must too: `%2F` must not launder a base64-standard run into exemption.
+        url = self.NOTION_URL.replace(
+            self.STATE, self.BARE_AWS_SECRET.replace("/", "%2F"), 1
+        )
+        assert oauth_url_contains_credential(url) is True
+
+    def test_off_length_challenge_loses_the_s256_exemption(self) -> None:
+        # An S256 challenge is base64url of a 32-byte digest: exactly 43 chars.
+        # A 40-char value in that field is not a challenge shape.
+        assert len(self.BARE_AWS_SECRET_ALNUM) == 40
+        url = self.NOTION_URL.replace(self.CHALLENGE, self.BARE_AWS_SECRET_ALNUM, 1)
+        assert oauth_url_contains_credential(url) is True
+
     @pytest.mark.parametrize("parameter", ["state", "code_challenge"])
     def test_markerless_secret_shape_is_banner_exempt_but_generically_redacted(
         self, parameter: str
     ) -> None:
         if parameter == "state":
-            value = self.BARE_AWS_SECRET
+            value = self.BARE_AWS_SECRET_ALNUM
             original = self.STATE
         else:
             value = self.BARE_AWS_SECRET_ALNUM + "abc"
             original = self.CHALLENGE
         url = self.NOTION_URL.replace(original, value, 1)
 
-        # A markerless value is indistinguishable from normal OAuth entropy at
+        # A markerless value that IS base64url-shaped (and, for the challenge,
+        # the right length) is indistinguishable from normal OAuth entropy at
         # this approved parameter boundary. General output redactors keep the
         # heuristic because they do not inherit the banner-only exemption.
         assert oauth_url_contains_credential(url) is False

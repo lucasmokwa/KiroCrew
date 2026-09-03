@@ -12294,6 +12294,28 @@ def _text_contains_bare_secret(text: str) -> bool:
 # is sent to the token endpoint, not on this front channel.
 _OAUTH_ENTROPY_QUERY_PARAMS = frozenset({"code_challenge", "nonce", "state"})
 
+# The exemption is bounded to shapes the protocol itself can emit, so an
+# AWS-secret-shaped run cannot ride a front-channel parameter into the blanked
+# set. base64url (RFC 4648 s5) emits `-`/`_` and never `+`/`/`, and an S256
+# challenge is base64url of a 32-byte digest -- exactly 43 characters.
+_OAUTH_S256_CHALLENGE_RE = re.compile(r"[A-Za-z0-9_-]{43}\Z")
+
+
+def _oauth_entropy_value_is_protocol_shaped(key: str, value: str) -> bool:
+    """Return True when *value* has a shape OAuth entropy can legitimately take.
+
+    Judged on the raw AND percent-decoded forms, because the markerless scan
+    runs over both: a raw-only test would let `%2F` smuggle the base64-standard
+    alphabet into the exemption.
+    """
+    for candidate in (value, unquote(value)):
+        if key == "code_challenge":
+            if not _OAUTH_S256_CHALLENGE_RE.fullmatch(candidate):
+                return False
+        elif "+" in candidate or "/" in candidate:
+            return False
+    return True
+
 
 def _oauth_credential_scan_target(
     url: str,
@@ -12306,9 +12328,11 @@ def _oauth_credential_scan_target(
     Fixed credential signatures are checked against the raw and decoded URL
     before this target is built. At an exact approved endpoint, only the
     code-owned state, nonce, and PKCE challenge fields are omitted from the
-    markerless bare-secret heuristic. Other recognized values, parameter names,
-    unknown parameters, and every non-query URL component remain in the scan
-    target.
+    markerless bare-secret heuristic, and only when the value carries a shape
+    the protocol can emit (see
+    :func:`_oauth_entropy_value_is_protocol_shaped`). Other recognized values,
+    parameter names, unknown parameters, and every non-query URL component
+    remain in the scan target.
     """
     if not approved_endpoint or not query:
         return url
@@ -12317,7 +12341,11 @@ def _oauth_credential_scan_target(
     for key, separator, value in (
         segment.partition("=") for segment in query.split("&")
     ):
-        approved_value = bool(separator) and key in _OAUTH_ENTROPY_QUERY_PARAMS
+        approved_value = (
+            bool(separator)
+            and key in _OAUTH_ENTROPY_QUERY_PARAMS
+            and _oauth_entropy_value_is_protocol_shaped(key, value)
+        )
         sanitized_segments.append(
             f"{key}{separator}" if approved_value else f"{key}{separator}{value}"
         )
