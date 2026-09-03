@@ -2014,6 +2014,10 @@ def kill_orphan_mcps(pids: list[int]) -> int:
                 )
             if _is_sweepable_orphan_mcp(pid, cmdline):
                 pgid = os.getpgid(pid)
+                # Enumerate the subtree BEFORE signalling the root: once the
+                # root dies its children reparent to init and the parent links
+                # this walk needs are gone.
+                subtree = _orphan_mcp_descendants(pid)
                 if pgid == pid and pgid != my_pgid and pgid > 1:
                     os.killpg(pgid, signal.SIGKILL)
                     killed += 1
@@ -2021,15 +2025,33 @@ def kill_orphan_mcps(pids: list[int]) -> int:
                 else:
                     # Candidate already passed UID + orphan-ppid + positive MCP
                     # marker + two-phase active-PID re-verify + cmdline re-check.
-                    # Direct os.kill of the confirmed-orphan PID only — NOT a tree
-                    # walk. _kill_pid_tree is gated by kiro-cli/claude markers that
-                    # MCP processes don't carry. If this orphan shares a pgid (not
-                    # its own group leader) and has children, those children that
-                    # carry an MCP marker are reclaimed on a subsequent sweep; any
-                    # without a marker were never sweep candidates to begin with.
                     os.kill(pid, signal.SIGKILL)
                     killed += 1
                     _sel_orphan_kill(pid, pgid, cmdline, "kill")
+                # Reap subtree members neither signal could reach. Two escapes
+                # make this necessary rather than belt-and-braces:
+                #
+                # 1. A launcher that ``setsid``-s its payload puts it in a NEW
+                #    process group, so ``killpg`` on the root's group never
+                #    touches it.
+                # 2. The "reclaimed on a subsequent sweep" fallback assumes a
+                #    surviving child reparents to init and becomes a candidate
+                #    itself. That breaks on an UNMARKED intermediate: it is a
+                #    candidate but not sweepable, so it lives forever AND hides
+                #    its own marked children behind a ppid that is not init, so
+                #    they are never enumerated by _our_orphan_pids either.
+                #
+                # Observed shape (Amazon Builder Toolbox, but any wrapper that
+                # execs a resolved binary produces it):
+                #     aim mcp start-server npm:@playwright/mcp   <- marked
+                #       -> <toolbox>/aim mcp start-server ...    <- marked
+                #         -> node .../3P/bin/playwright-mcp      <- UNMARKED
+                #           -> npm exec @playwright/mcp@latest   <- marked
+                # One host accumulated 112 such processes (15.2 GB RSS) over 23
+                # days of sweeps that were running the whole time.
+                killed += _kill_orphan_mcp_descendants(
+                    subtree, root=pid, budget=_ORPHAN_SWEEP_MAX_KILLS - killed
+                )
                 continue
             # Unreachable-gatewayd orphan: re-verify the FULL identity —
             # the socket-path stat AND the age floor — right before
@@ -2106,6 +2128,115 @@ def _sel_orphan_kill(pid: int, pgid: int, cmdline: bytes, method: str) -> None:
         )
     except Exception:
         logger.debug("SEL orphan-kill audit failed", exc_info=True)
+
+
+def _orphan_mcp_descendants(pid: int) -> list[int]:
+    """Preorder descendants of a confirmed MCP-launcher orphan (best-effort).
+
+    Called BEFORE the root is signalled: after the root dies its children
+    reparent to init and the ``/proc`` parent links this walk reads are gone.
+    """
+    try:
+        # circular import: session_pid → acp.client → session → session_pid
+        from kiro_crew.acp.client import _get_child_pids
+
+        return _get_child_pids(pid)
+    except Exception:
+        logger.debug("Error enumerating descendants of MCP orphan %s", pid, exc_info=True)
+        return []
+
+
+def _kill_orphan_mcp_descendants(descendants: list[int], *, root: int, budget: int) -> int:
+    """SIGKILL leftover subtree members of a reaped MCP-launcher orphan, leaf-first.
+
+    Mirrors :func:`_kill_orphan_work_tree`: descendants were enumerated once
+    (preorder) and are killed in reverse so every process dies before its
+    parent. *budget* is the caller's remaining
+    :data:`_ORPHAN_SWEEP_MAX_KILLS` allowance, so subtree members count
+    against the same global cap; survivors are re-reaped next sweep.
+
+    Positive identity per member — the root passing the sweep gate does NOT
+    license killing arbitrary descendants:
+
+    * ``KIROCREW_SPAWNED`` in the member's exec-time environ, proving it
+      belongs to a tree Kiro Crew spawned (:func:`_env_has_kirocrew_marker`,
+      Linux-only and fail-closed, so this whole reap is a no-op off Linux —
+      matching the work-class floor).
+    * NOT a gateway/CLI entrypoint (:data:`_GATEWAY_MARKERS`), so an
+      agent-launched peer gateway or dev pod under the same tree survives.
+    * Never this process, its group leader, or pid <= 1.
+
+    A member whose cmdline is unreadable is skipped rather than killed: the
+    marker read and the exclusion check both need it, and failing closed here
+    costs one sweep cycle while failing open could kill a live peer.
+
+    Returns the number of processes killed.
+    """
+    if budget <= 0 or not descendants:
+        return 0
+    if platform_compat.IS_WINDOWS:
+        return 0  # tree kill after a session ends already went through taskkill /T
+    my_pid = os.getpid()
+    my_pgid = os.getpgrp()
+    killed = 0
+    for target in reversed(descendants):
+        if killed >= budget:
+            break  # global kill cap exhausted; next sweep cycle finishes the job
+        if target <= 1 or target == my_pid or target == my_pgid or target == root:
+            continue
+        try:
+            if sys.platform == "linux":
+                cmdline = Path(f"/proc/{target}/cmdline").read_bytes()
+            else:
+                cmdline = subprocess.check_output(
+                    ["ps", "-o", "command=", "-p", str(target)],
+                    stderr=subprocess.DEVNULL,
+                    timeout=2,
+                )
+        except (OSError, subprocess.SubprocessError):
+            continue  # vanished or unreadable — fail closed
+        if not cmdline:
+            continue
+        if any(marker in cmdline.replace(b"\x00", b" ") for marker in _GATEWAY_MARKERS):
+            continue  # never a peer gateway / dev pod
+        if not _env_has_kirocrew_marker(target):
+            continue  # not provably part of a Kiro Crew tree
+        try:
+            platform_compat.kill_pid(target, platform_compat.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            continue
+        killed += 1
+        logger.info(
+            "Orphan MCP sweep: SIGKILL pid=%d reason=descendant of MCP launcher orphan %d",
+            target,
+            root,
+        )
+    if killed:
+        _sel_orphan_mcp_subtree_kill(root, killed)
+    return killed
+
+
+def _sel_orphan_mcp_subtree_kill(root: int, killed: int) -> None:
+    """Emit SEL audit event for an MCP-launcher subtree kill."""
+    try:
+        # Lazy import to avoid a circular import (see kill_orphan_mcps).
+        from kiro_crew.sel import sel
+
+        sel().log_tool_invocation(
+            session_key="gateway",
+            agent="kirocrew",
+            source="background",
+            tool_name="orphan_mcp_sweep",
+            tool_kind="process_kill",
+            outcome="completed",
+            resources=f"root={root} method=mcp_subtree",
+            metadata={
+                "killed_in_tree": killed,
+                "reason": "descendants of KIROCREW_SPAWNED MCP launcher orphan",
+            },
+        )
+    except Exception:
+        logger.debug("SEL orphan-mcp-subtree-kill audit failed", exc_info=True)
 
 
 def _kill_orphan_work_tree(pid: int, cmdline: bytes, age_seconds: float, budget: int) -> int:

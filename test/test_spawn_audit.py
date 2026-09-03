@@ -1197,6 +1197,7 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         "service/linux.py::_write_unit_via_sudo",
         "service/macos.py::_launchctl",
         "session_pid.py::_our_orphan_pids",
+        "session_pid.py::_kill_orphan_mcp_descendants",
         "session_pid.py::find_orphan_mcp_candidates",
         "session_pid.py::kill_orphan_mcps",
         "slack/gateway.py::_auto_apply_update",
