@@ -193,6 +193,64 @@ SLOT_OWNED_META_KEYS: frozenset[str] = frozenset(
     }
 )
 
+# The subset of :data:`SLOT_OWNED_META_KEYS` a ROWS-ONLY slot save still owns.
+#
+# A save that must persist a slot's messages onto a transcript whose metadata line
+# describes a DIFFERENT live slot cannot use the whole ownership claim above: the
+# rebuild would revert the other slot's title, folder, tags or pin. Such a save
+# preserves every slot-owned field the line already carries and keeps authority
+# over only these — the file's identity and accounting, which every writer
+# maintains, and the close flags, whose absence is what makes the write
+# open-shaped and so must still erase rather than be carried forward.
+#
+# Narrowing this far is only correct against ANOTHER slot's line, so the save
+# establishes that first (from the line's ``tab_id``) and falls back to the full
+# claim otherwise. Applied to a slot's own line it would strand that slot's
+# uncommitted metadata instead of protecting anyone's.
+ROWS_ONLY_OWNED_META_KEYS: frozenset[str] = frozenset(
+    {"_type", "created_at", "last_consolidated", "closed", "closed_at"}
+)
+
+# The keys a ROWS-ONLY slot save must DROP from its rebuild so the on-disk values
+# are carried back verbatim.
+#
+# Named here in full rather than derived at the call site as
+# ``SLOT_OWNED_META_KEYS - ROWS_ONLY_OWNED_META_KEYS``, because that difference
+# under-approximates: the slot save also writes fields that DESCRIBE an owned one
+# without being owned themselves (absence must not erase them, so they are
+# deliberately outside the ownership claim and survive via
+# :func:`carry_unowned_metadata`). Deferring the described field while keeping the
+# describing one commits a line that matches NEITHER slot — worse than either,
+# because each half is separately valid and nothing downstream can detect the
+# mismatch. ``title_origin`` and ``title_refresh_mark`` are the title's provenance
+# and its background-refresh budget: read back beside another slot's title they
+# either unlock the refresh on a name a user typed by hand or lock a generated name
+# out of refresh permanently. They travel WITH the title, so they are deferred with
+# it.
+#
+# ``created_by`` and ``origin`` are the same shape and the highest-consequence
+# instance of it, because what they describe is AUTHORIZATION rather than
+# presentation. ``created_by`` is the attribution the member ownership boundary in
+# session-control reads, and it is meaningless without the ``mode`` that is deferred
+# beside it — a member ``mode`` from the live holder read next to a different
+# principal's ``created_by`` names an owner who never opened this session.
+# ``origin`` must round-trip with ``app``, also deferred: split, a tab reads back as
+# one holder's slot kind wearing the other's app binding, which is what decides
+# ``slots:user`` visibility and the unattended approval window. Both are attributes
+# of the SLOT, not facts about the conversation, so on a transcript with a live
+# holder the holder's are the true ones. Deferring them also fails CLOSED where the
+# line carries none: an absent ``created_by`` denies rather than grants, and an
+# absent ``origin`` restores to the empty sentinel the rehydrate paths already treat
+# that way.
+#
+# What is left out is left out deliberately: ``auto_tagged``, ``human_seen``,
+# ``channel_origin`` and ``channel_folder_filed`` are MONOTONE once-flags about the
+# CONVERSATION, set and never cleared, so a shared transcript's two writers cannot
+# disagree about them in a way that outlives the pair.
+ROWS_ONLY_DEFERRED_META_KEYS: frozenset[str] = (
+    SLOT_OWNED_META_KEYS - ROWS_ONLY_OWNED_META_KEYS
+) | frozenset({"title_origin", "title_refresh_mark", "created_by", "origin"})
+
 
 def carry_unowned_metadata(
     rebuilt: dict,
